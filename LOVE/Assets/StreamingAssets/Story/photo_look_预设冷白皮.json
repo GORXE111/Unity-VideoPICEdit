@@ -1,0 +1,199 @@
+﻿{
+    "exposure": 0.4000000059604645,
+    "contrast": 1.0099999904632569,
+    "saturation": 0.9100000262260437,
+    "skinProtect": 0.1289999932050705,
+    "temperature": 0.6000000238418579,
+    "tint": 0.0,
+    "hueShift": 0.008999999612569809,
+    "highlights": 0.10000000149011612,
+    "shadows": 0.05999999865889549,
+    "tonemap": 0,
+    "inBlack": 0.0,
+    "inWhite": 1.0,
+    "levelsGamma": 1.0,
+    "outBlack": 0.0,
+    "outWhite": 1.0,
+    "lift": -0.009999999776482582,
+    "liftR": -0.01600000075995922,
+    "liftG": -0.03099999949336052,
+    "liftB": -0.03099999949336052,
+    "gammaMaster": 1.0,
+    "gammaR": 1.0199999809265137,
+    "gammaG": 1.0199999809265137,
+    "gammaB": 0.9200000166893005,
+    "gainMaster": 1.0700000524520875,
+    "gainR": 0.949999988079071,
+    "gainG": 0.9700000286102295,
+    "gainB": 1.0299999713897706,
+    "offset": 0.009999999776482582,
+    "offsetR": 0.014000000432133675,
+    "offsetG": -0.003000000026077032,
+    "offsetB": 0.0,
+    "shadowHue": 0.27000001072883608,
+    "shadowStrength": 0.0689999982714653,
+    "highlightHue": 0.5400000214576721,
+    "highlightStrength": 0.0689999982714653,
+    "splitBalance": -0.2240000069141388,
+    "curveEnabled": false,
+    "curveMaster": {
+        "serializedVersion": "2",
+        "m_Curve": [
+            {
+                "serializedVersion": "3",
+                "time": 0.0,
+                "value": 0.0,
+                "inSlope": 0.0,
+                "outSlope": 1.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            },
+            {
+                "serializedVersion": "3",
+                "time": 1.0,
+                "value": 1.0,
+                "inSlope": 1.0,
+                "outSlope": 0.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            }
+        ],
+        "m_PreInfinity": 2,
+        "m_PostInfinity": 2,
+        "m_RotationOrder": 4
+    },
+    "curveR": {
+        "serializedVersion": "2",
+        "m_Curve": [
+            {
+                "serializedVersion": "3",
+                "time": 0.0,
+                "value": 0.0,
+                "inSlope": 0.0,
+                "outSlope": 1.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            },
+            {
+                "serializedVersion": "3",
+                "time": 1.0,
+                "value": 1.0,
+                "inSlope": 1.0,
+                "outSlope": 0.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            }
+        ],
+        "m_PreInfinity": 2,
+        "m_PostInfinity": 2,
+        "m_RotationOrder": 4
+    },
+    "curveG": {
+        "serializedVersion": "2",
+        "m_Curve": [
+            {
+                "serializedVersion": "3",
+                "time": 0.0,
+                "value": 0.0,
+                "inSlope": 0.0,
+                "outSlope": 1.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            },
+            {
+                "serializedVersion": "3",
+                "time": 1.0,
+                "value": 1.0,
+                "inSlope": 1.0,
+                "outSlope": 0.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            }
+        ],
+        "m_PreInfinity": 2,
+        "m_PostInfinity": 2,
+        "m_RotationOrder": 4
+    },
+    "curveB": {
+        "serializedVersion": "2",
+        "m_Curve": [
+            {
+                "serializedVersion": "3",
+                "time": 0.0,
+                "value": 0.0,
+                "inSlope": 0.0,
+                "outSlope": 1.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            },
+            {
+                "serializedVersion": "3",
+                "time": 1.0,
+                "value": 1.0,
+                "inSlope": 1.0,
+                "outSlope": 0.0,
+                "tangentMode": 0,
+                "weightedMode": 0,
+                "inWeight": 0.0,
+                "outWeight": 0.0
+            }
+        ],
+        "m_PreInfinity": 2,
+        "m_PostInfinity": 2,
+        "m_RotationOrder": 4
+    },
+    "secondaryEnabled": true,
+    "windowShape": 1,
+    "windowCenter": {
+        "x": 0.5192307829856873,
+        "y": 0.6825938820838928
+    },
+    "windowSize": {
+        "x": 0.3140000104904175,
+        "y": 0.4090000092983246
+    },
+    "windowRotation": 26.0,
+    "windowFeather": 0.30000001192092898,
+    "windowInvert": false,
+    "qualifierEnabled": true,
+    "qualHueCenter": 0.05999999865889549,
+    "qualHueRange": 0.05000000074505806,
+    "qualHueSoft": 0.03500000014901161,
+    "qualSatMin": 0.11999999731779099,
+    "qualSatMax": 0.75,
+    "qualSatSoft": 0.07999999821186066,
+    "qualLumMin": 0.26363635063171389,
+    "qualLumMax": 1.0,
+    "qualLumSoft": 0.10000000149011612,
+    "secExposure": 0.10999999940395355,
+    "secContrast": 0.9330000281333923,
+    "secSaturation": 0.996999979019165,
+    "secHueShift": 0.0020000000949949028,
+    "secTintHue": 0.2070000022649765,
+    "secTintStrength": 0.009999999776482582,
+    "showMask": false,
+    "bloomThreshold": 0.5600000023841858,
+    "bloomIntensity": 1.0499999523162842,
+    "bloomScatter": 0.7979999780654907,
+    "blur": 0.12099999934434891,
+    "sharpen": 0.25999999046325686,
+    "vignetteIntensity": 0.0,
+    "vignetteSmoothness": 0.5,
+    "grain": 0.0,
+    "chromatic": 0.0,
+    "dither": 0.2409999966621399
+}

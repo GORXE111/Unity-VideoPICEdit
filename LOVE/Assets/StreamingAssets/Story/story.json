@@ -1,0 +1,88 @@
+{
+  "startId": "v1",
+  "titleBgm": "can_i_have_the_day_with_you",
+  "transitionDuration": 0.35,
+
+  "segments": [
+    {
+      "id": "v1",
+      "title": "桥段 1 · 去哪儿",
+      "video": "v1.mp4",
+      "placeholderSeconds": 66.7,
+
+      "bgm": "can_i_have_the_day_with_you",
+      "bgmFade": 2.0,
+
+      "loopWhileWaiting": false,
+      "loopStart": 0,
+      "choiceShowTime": -1,
+      "waitVideoEndAfterSelect": false,
+
+      "next": "",
+      "choices": [
+        { "text": "去电影院吧", "next": "v2" },
+        { "text": "去网吧吧，我想玩会游戏", "next": "v2" }
+      ]
+    },
+
+    {
+      "id": "v2",
+      "title": "桥段 2 · 察觉到她的心事",
+      "video": "v2.mp4",
+      "placeholderSeconds": 12.6,
+
+      "bgm": "",
+      "bgmFade": -1,
+
+      "loopWhileWaiting": false,
+      "loopStart": 0,
+      "choiceShowTime": -1,
+      "waitVideoEndAfterSelect": false,
+
+      "next": "",
+      "choices": [
+        { "text": "怎么了？你想到什么烦心事了么？", "next": "v3" },
+        { "text": "是不是觉得水族馆玩腻了？", "next": "v3" }
+      ]
+    },
+
+    {
+      "id": "v3",
+      "title": "桥段 3 · 要不要现在过去",
+      "video": "v3.mp4",
+      "placeholderSeconds": 19.7,
+
+      "bgm": "",
+      "bgmFade": -1,
+
+      "loopWhileWaiting": false,
+      "loopStart": 0,
+      "choiceShowTime": -1,
+      "waitVideoEndAfterSelect": false,
+
+      "next": "",
+      "choices": [
+        { "text": "现在就过去", "next": "v4" },
+        { "text": "我们还是再逛逛吧", "next": "v4" }
+      ]
+    },
+
+    {
+      "id": "v4",
+      "title": "桥段 4 · 收尾",
+      "video": "v4.mp4",
+      "placeholderSeconds": 31.0,
+
+      "bgm": "",
+      "bgmFade": -1,
+
+      "loopWhileWaiting": false,
+      "loopStart": 0,
+      "choiceShowTime": -1,
+      "waitVideoEndAfterSelect": false,
+
+      "next": "",
+      "choices": []
+    }
+  ]
+}
