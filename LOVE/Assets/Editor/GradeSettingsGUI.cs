@@ -30,6 +30,8 @@ namespace Love.EditorTools
         bool _foldQuality   { get => GetFold("quality", false);   set => SetFold("quality", value); }
         bool _foldSix       { get => GetFold("sixcurve", false);  set => SetFold("sixcurve", value); }
         bool _foldLibrary   { get => GetFold("library", false);   set => SetFold("library", value); }
+        bool _foldHsl       { get => GetFold("hsl", false);       set => SetFold("hsl", value); }
+        bool _foldCrop      { get => GetFold("crop", false);      set => SetFold("crop", value); }
 
         string _newPresetName = "";
         List<string> _presetCache;
@@ -50,6 +52,13 @@ namespace Love.EditorTools
         /// </summary>
         public float PanelWidth { get; set; } = 360f;
 
+        /// <summary>
+        /// 当前源图的像素尺寸。裁剪的比例预设要靠它换算成归一化的框——
+        /// 不知道原图多宽多高，就没法把「16:9」变成一组 cropW / cropH。
+        /// 调用方不设的话，比例按钮只剩「自由」能用。
+        /// </summary>
+        public Vector2Int SourceSize { get; set; }
+
         bool _externalChange;
 
         /// <summary>
@@ -69,6 +78,9 @@ namespace Love.EditorTools
 
             _foldLibrary = Section(_foldLibrary, "预设库");
             if (_foldLibrary) DrawPresetLibrary(s);
+
+            _foldCrop = Section(_foldCrop, "裁剪与旋转");
+            if (_foldCrop) DrawCrop(s);
 
             _foldLog = Section(_foldLog, "素材解码与校色基准");
             if (_foldLog)
@@ -93,10 +105,12 @@ namespace Love.EditorTools
                 Slider("通透度", ref s.clarity, -1f, 1f);
                 Slider("  通透半径", ref s.clarityRadius, 2f, 16f);
                 Slider("纹理", ref s.texture, -1f, 1f);
+                Slider("去朦胧", ref s.dehaze, -1f, 1f);
                 EditorGUILayout.Space(2f);
                 Slider("锐化", ref s.sharpen, 0f, 2f);
                 Slider("  只锐对焦区", ref s.sharpenFocusOnly, 0f, 1f);
-                EditorGUILayout.HelpBox("纹理负值可磨皮；「只锐对焦区」靠局部对比判断，避免把背景噪点锐出来。",
+                EditorGUILayout.HelpBox("纹理负值可磨皮；「只锐对焦区」靠局部对比判断，避免把背景噪点锐出来。\n" +
+                                        "去朦胧走大气散射模型，负值反过来是加雾。它不带饱和度补偿，通常要配合饱和度一起调。",
                                         MessageType.None);
             }
 
@@ -142,6 +156,9 @@ namespace Love.EditorTools
 
             _foldCurve = Section(_foldCurve, "曲线");
             if (_foldCurve) DrawCurves(s);
+
+            _foldHsl = Section(_foldHsl, "HSL 八色带混合器");
+            if (_foldHsl) DrawHslMixer(s);
 
             _foldSix = Section(_foldSix, "六条曲线");
             if (_foldSix)
@@ -616,6 +633,151 @@ namespace Love.EditorTools
         #endregion
 
         #region 控件
+
+        #region 裁剪与旋转
+
+        // 常用构图比例。ratio 是宽/高，0 表示自由不锁
+        static readonly (string name, float ratio)[] AspectPresets =
+        {
+            ("自由", 0f), ("1:1", 1f), ("4:3", 4f / 3f), ("3:2", 3f / 2f),
+            ("16:9", 16f / 9f), ("9:16", 9f / 16f), ("2.39:1", 2.39f),
+        };
+
+        void DrawCrop(VideoGradeSettings s)
+        {
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("逆时针 90°")) { RecordUndo("旋转"); s.rotate90 = (s.rotate90 + 3) % 4; }
+            if (GUILayout.Button("顺时针 90°")) { RecordUndo("旋转"); s.rotate90 = (s.rotate90 + 1) % 4; }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            Toggle("水平翻转", ref s.flipH);
+            Toggle("垂直翻转", ref s.flipV);
+            EditorGUILayout.EndHorizontal();
+
+            Slider("拉直", ref s.straighten, -45f, 45f);
+
+            EditorGUILayout.Space(4f);
+            Toggle("启用裁剪", ref s.cropEnabled);
+
+            using (new EditorGUI.DisabledScope(!s.cropEnabled))
+            {
+                EditorGUILayout.LabelField("构图比例", EditorStyles.miniBoldLabel);
+
+                // 七个按钮一行放不下，按面板宽度折行
+                int perRow = Mathf.Max(3, Mathf.FloorToInt(PanelWidth / 66f));
+                for (int i = 0; i < AspectPresets.Length; i += perRow)
+                {
+                    EditorGUILayout.BeginHorizontal();
+                    for (int j = i; j < Mathf.Min(i + perRow, AspectPresets.Length); j++)
+                    {
+                        var preset = AspectPresets[j];
+                        if (!GUILayout.Button(preset.name, EditorStyles.miniButton)) continue;
+                        RecordUndo("裁剪比例 " + preset.name);
+                        if (preset.ratio <= 0f) s.ResetCrop();
+                        else ApplyAspect(s, preset.ratio);
+                        s.cropEnabled = true;
+                    }
+                    EditorGUILayout.EndHorizontal();
+                }
+
+                Slider("左边界", ref s.cropX, 0f, 0.95f);
+                Slider("下边界", ref s.cropY, 0f, 0.95f);
+                Slider("宽度", ref s.cropW, 0.05f, 1f);
+                Slider("高度", ref s.cropH, 0.05f, 1f);
+
+                // 出界的框渲染端会夹回去，但界面上不说一声，用户只会觉得滑条失灵
+                if (s.cropX + s.cropW > 1.0005f || s.cropY + s.cropH > 1.0005f)
+                    EditorGUILayout.HelpBox("裁剪框超出画面，渲染时会自动往回夹。", MessageType.Warning);
+
+                if (SourceSize.x > 0 && SourceSize.y > 0)
+                {
+                    s.OutputSize(SourceSize.x, SourceSize.y, out int ow, out int oh);
+                    EditorGUILayout.LabelField("输出尺寸", ow + " × " + oh);
+                }
+
+                if (GUILayout.Button("重置裁剪")) { RecordUndo("重置裁剪"); s.ResetCrop(); }
+            }
+        }
+
+        /// <summary>套一个长宽比：取画面里最大的、居中的、满足该比例的框。</summary>
+        void ApplyAspect(VideoGradeSettings s, float ratio)
+        {
+            if (SourceSize.x <= 0 || SourceSize.y <= 0) return;
+
+            // 裁剪框定义在旋转之后的画面里，所以这里也要按旋转后的长宽算
+            float bw = (s.rotate90 & 1) == 0 ? SourceSize.x : SourceSize.y;
+            float bh = (s.rotate90 & 1) == 0 ? SourceSize.y : SourceSize.x;
+            float imgRatio = bw / Mathf.Max(bh, 1f);
+
+            float cw, ch;
+            if (ratio >= imgRatio) { cw = 1f; ch = imgRatio / ratio; }   // 目标更宽，宽度顶满
+            else                   { ch = 1f; cw = ratio / imgRatio; }   // 目标更高，高度顶满
+
+            s.cropW = cw; s.cropH = ch;
+            s.cropX = (1f - cw) * 0.5f;
+            s.cropY = (1f - ch) * 0.5f;
+        }
+
+        #endregion
+
+        #region HSL 八色带混合器
+
+        int _hslTab;
+
+        void DrawHslMixer(VideoGradeSettings s)
+        {
+            Toggle("启用 HSL 混合器", ref s.hslEnabled);
+
+            using (new EditorGUI.DisabledScope(!s.hslEnabled))
+            {
+                _hslTab = GUILayout.Toolbar(_hslTab, new[] { "色相", "饱和度", "明亮度" });
+
+                // 这三个字段是后加的，早先存下来的 grade.json 里根本没有，读进来可能是 null
+                EnsureBands(ref s.hslHue); EnsureBands(ref s.hslSat); EnsureBands(ref s.hslLum);
+
+                var arr = _hslTab == 0 ? s.hslHue : _hslTab == 1 ? s.hslSat : s.hslLum;
+                string what = _hslTab == 0 ? "色相" : _hslTab == 1 ? "饱和度" : "明亮度";
+
+                for (int i = 0; i < VideoGradeSettings.HslBandCount; i++)
+                    BandSlider(VideoGradeSettings.HslNames[i], VideoGradeSettings.HslCenters[i], arr, i, what);
+
+                if (GUILayout.Button("这一页归零"))
+                {
+                    RecordUndo("HSL 归零");
+                    for (int i = 0; i < arr.Length; i++) arr[i] = 0f;
+                }
+
+                EditorGUILayout.HelpBox("接近中性灰的像素不受影响——那里的色相本来就是噪声，" +
+                                        "动它只会让灰墙和白衬衫染上颜色。", MessageType.None);
+            }
+        }
+
+        static void EnsureBands(ref float[] a)
+        {
+            if (a == null || a.Length != VideoGradeSettings.HslBandCount)
+                a = new float[VideoGradeSettings.HslBandCount];
+        }
+
+        /// <summary>一行 = 色带颜色块 + 滑条。有色块就不用记「第三根是黄色」。</summary>
+        void BandSlider(string name, float hue, float[] arr, int i, string what)
+        {
+            var row = EditorGUILayout.GetControlRect();
+
+            // GetControlRect 在 Layout 事件返回的是占位矩形，那时候画色块位置是错的
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(new Rect(row.x, row.y + 2f, 12f, row.height - 4f),
+                                   Color.HSVToRGB(hue, 0.8f, 0.95f));
+
+            var rest = new Rect(row.x + 16f, row.y, row.width - 16f, row.height);
+            EditorGUI.BeginChangeCheck();
+            float v = EditorGUI.Slider(rest, name, arr[i], -1f, 1f);
+            if (!EditorGUI.EndChangeCheck()) return;
+            RecordUndo("HSL " + what + "：" + name);
+            arr[i] = v;
+        }
+
+        #endregion
 
         public static bool Section(bool state, string title)
         {

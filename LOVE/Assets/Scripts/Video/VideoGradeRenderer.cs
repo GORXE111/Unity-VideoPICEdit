@@ -104,6 +104,16 @@ namespace Love.Video
         static readonly int IdLutAmount   = Shader.PropertyToID("_LutAmount");
         static readonly int IdSixCurveTex = Shader.PropertyToID("_SixCurveTex");
         static readonly int IdZebra       = Shader.PropertyToID("_Zebra");
+        static readonly int IdDehaze      = Shader.PropertyToID("_Dehaze");
+        static readonly int IdHslHueA     = Shader.PropertyToID("_HslHueA");
+        static readonly int IdHslHueB     = Shader.PropertyToID("_HslHueB");
+        static readonly int IdHslSatA     = Shader.PropertyToID("_HslSatA");
+        static readonly int IdHslSatB     = Shader.PropertyToID("_HslSatB");
+        static readonly int IdHslLumA     = Shader.PropertyToID("_HslLumA");
+        static readonly int IdHslLumB     = Shader.PropertyToID("_HslLumB");
+        static readonly int IdCropRect    = Shader.PropertyToID("_CropRect");
+        static readonly int IdStraighten  = Shader.PropertyToID("_Straighten");
+        static readonly int IdGeoFlags    = Shader.PropertyToID("_GeoFlags");
 
         #endregion
 
@@ -132,6 +142,7 @@ namespace Love.Video
         const int PassUpsample = 2;
         const int PassDetail = 3;
         const int PassComposite = 4;
+        const int PassGeometry = 5;
 
         /// <summary>把 src 过一遍完整的调色管线，结果写进 dst。</summary>
         public void Render(Texture src, RenderTexture dst, VideoGradeSettings settings, Options options)
@@ -142,6 +153,19 @@ namespace Love.Video
             {
                 Graphics.Blit(src, dst);
                 return;
+            }
+
+            // ---- 几何：裁剪 / 拉直 / 旋转。必须在最前面，
+            // 因为它改变画面尺寸和构图中心，后面的宽高比、暗角、Power Window 都要按新画面算 ----
+            RenderTexture geo = null;
+            if (settings.HasGeometry)
+            {
+                settings.OutputSize(src.width, src.height, out int gw, out int gh);
+                geo = RenderTexture.GetTemporary(gw, gh, 0,
+                                                 RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                ApplyGeometryUniforms(src, settings);
+                Graphics.Blit(src, geo, _material, PassGeometry);
+                src = geo;
             }
 
             ApplyUniforms(src, settings, options);
@@ -173,8 +197,12 @@ namespace Love.Video
             // 背景虚化和整体模糊共用同一条链，谁的强度大就按谁的半径建
             bool hasMask = options.externalMask != null;
             float blurNeed = Mathf.Max(settings.blur, hasMask ? settings.backgroundBlur : 0f);
-            if (blurNeed > 0.001f)
-                blur = BuildBlurChain(stageSrc, false, Mathf.Clamp(1 + Mathf.RoundToInt(blurNeed * 4f), 1, 5));
+            // 去朦胧要拿一张大范围模糊当局部大气光的估计。
+            // 即使模糊强度是 0 也得把链建起来——但 _BlurAmount 仍然是 0，
+            // 所以合成时那次 lerp 是空操作，模糊不会真的糊到画面上
+            float chainNeed = Mathf.Max(blurNeed, Mathf.Abs(settings.dehaze) > 0.001f ? 0.6f : 0f);
+            if (chainNeed > 0.001f)
+                blur = BuildBlurChain(stageSrc, false, Mathf.Clamp(1 + Mathf.RoundToInt(chainNeed * 4f), 1, 5));
 
             _material.SetTexture(IdBloomTex, bloom != null ? (Texture)bloom : Texture2D.blackTexture);
             _material.SetTexture(IdBlurTex,  blur  != null ? (Texture)blur  : stageSrc);
@@ -184,6 +212,7 @@ namespace Love.Video
             if (bloom  != null) RenderTexture.ReleaseTemporary(bloom);
             if (blur   != null) RenderTexture.ReleaseTemporary(blur);
             if (detail != null) RenderTexture.ReleaseTemporary(detail);
+            if (geo    != null) RenderTexture.ReleaseTemporary(geo);
         }
 
         /// <summary>
@@ -306,7 +335,18 @@ namespace Love.Video
             }
             _material.SetVector(IdZebra, new Vector4(s.zebraHigh, s.zebraLow, 0f, 0f));
 
+            _material.SetFloat(IdDehaze, s.dehaze);
+
+            PackBands(s.hslHue, out var hslH0, out var hslH1);
+            PackBands(s.hslSat, out var hslS0, out var hslS1);
+            PackBands(s.hslLum, out var hslL0, out var hslL1);
+            _material.SetVector(IdHslHueA, hslH0); _material.SetVector(IdHslHueB, hslH1);
+            _material.SetVector(IdHslSatA, hslS0); _material.SetVector(IdHslSatB, hslS1);
+            _material.SetVector(IdHslLumA, hslL0); _material.SetVector(IdHslLumB, hslL1);
+
             SetKeyword("LOVE_LUT_ON", lutOn);
+            // 面板开着但八个色带全是 0 时输出和关掉完全一样，那就别让它进编译
+            SetKeyword("LOVE_HSL_ON", s.hslEnabled && (AnyNonZero(s.hslHue) || AnyNonZero(s.hslSat) || AnyNonZero(s.hslLum)));
             SetKeyword("LOVE_SIXCURVE_ON", s.sixCurveEnabled && _sixCurveLut != null);
             SetKeyword("LOVE_CURVE_ON", s.curveEnabled && _curveLut != null);
             SetKeyword("LOVE_SECONDARY_ON", s.secondaryEnabled);
@@ -339,6 +379,44 @@ namespace Love.Video
             _material.SetFloat(IdSecSat, s.secSaturation);
             _material.SetFloat(IdSecHue, s.secHueShift);
             _material.SetVector(IdSecTint, s.SecondaryTint);
+        }
+
+        /// <summary>八个色带打成两个 Vector4——shader 端没有 float[] 这种东西。</summary>
+        static void PackBands(float[] v, out Vector4 a, out Vector4 b)
+        {
+            a = new Vector4(Band(v, 0), Band(v, 1), Band(v, 2), Band(v, 3));
+            b = new Vector4(Band(v, 4), Band(v, 5), Band(v, 6), Band(v, 7));
+        }
+
+        // 数组可能是 null 或长度不对（老预设 JSON 里根本没有这几个字段）
+        static float Band(float[] v, int i) => v != null && i < v.Length ? v[i] : 0f;
+
+        static bool AnyNonZero(float[] v)
+        {
+            if (v == null) return false;
+            for (int i = 0; i < v.Length; i++)
+                if (Mathf.Abs(v[i]) > 0.001f) return true;
+            return false;
+        }
+
+        void ApplyGeometryUniforms(Texture src, VideoGradeSettings s)
+        {
+            float cw = s.cropEnabled ? Mathf.Clamp(s.cropW, 0.01f, 1f) : 1f;
+            float ch = s.cropEnabled ? Mathf.Clamp(s.cropH, 0.01f, 1f) : 1f;
+            // 夹一下防止裁剪框被拖出画面
+            float cx = s.cropEnabled ? Mathf.Clamp(s.cropX, 0f, 1f - cw) : 0f;
+            float cy = s.cropEnabled ? Mathf.Clamp(s.cropY, 0f, 1f - ch) : 0f;
+            _material.SetVector(IdCropRect, new Vector4(cx, cy, cw, ch));
+
+            float rad = s.straighten * Mathf.Deg2Rad;
+            _material.SetVector(IdStraighten, new Vector4(Mathf.Cos(rad), Mathf.Sin(rad), 0f, 0f));
+
+            int rot = ((s.rotate90 % 4) + 4) % 4;
+            // 拉直是在"转过 90 度之后"的画面里做的，所以宽高比要用转过之后的
+            float rw = (rot & 1) == 0 ? src.width : src.height;
+            float rh = (rot & 1) == 0 ? src.height : src.width;
+            _material.SetVector(IdGeoFlags, new Vector4(s.flipH ? 1f : 0f, s.flipV ? 1f : 0f,
+                                                        rot, rh > 0.5f ? rw / rh : 1f));
         }
 
         /// <summary>

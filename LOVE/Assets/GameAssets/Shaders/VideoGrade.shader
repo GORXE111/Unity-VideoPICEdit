@@ -5,7 +5,8 @@
 //   1 纯降采样（整体模糊用）
 //   2 帐篷升采样
 //   3 细节滤波：镜头畸变 + 双边降噪 + 通透度 + 纹理 + 智能锐化 —— 都关掉时 C# 端整趟跳过
-//   4 合成 + 调色：LOG 解码 / 校色矩阵 / 一级 / 曲线 / 六条曲线 / LUT / 二级 / 风格化 / 监看
+//   4 合成 + 调色：LOG 解码 / 校色矩阵 / 去朦胧 / 一级 / 曲线 / HSL / 六条曲线 / LUT / 二级 / 风格化 / 监看
+//   5 几何：裁剪 / 拉直 / 90 度旋转 / 翻转 —— 跑在整条管线最前面
 //
 // 具体算法都在 .cginc 里（Common / Log / Color / Masks），这个文件只负责编排。
 // 关掉的功能靠 shader_feature 在编译期消失，而不是运行期每像素判一次分支。
@@ -181,6 +182,7 @@ Shader "Hidden/Love/VideoGrade"
             #pragma shader_feature_local LOVE_SECONDARY_ON
             #pragma shader_feature_local LOVE_LUT_ON
             #pragma shader_feature_local LOVE_SIXCURVE_ON
+            #pragma shader_feature_local LOVE_HSL_ON
 
             #include "VideoGradeCommon.cginc"
             #include "VideoGradeLog.cginc"
@@ -196,6 +198,7 @@ Shader "Hidden/Love/VideoGrade"
             half  _BloomIntensity;
             half  _BlurAmount;
             half  _Chromatic;
+            half  _Dehaze;
 
             half  _MaskInvert;
             half2 _MaskRemap;        // x=下限 y=上限，用来收缩/扩张边缘
@@ -237,14 +240,25 @@ Shader "Hidden/Love/VideoGrade"
 
                 // 整体模糊和背景虚化取较大者：前者是风格，后者是伪景深，可以叠加
                 half blurMix = max(_BlurAmount, _BgBlur * (1.0h - maskV));
+                // 只采这一次：下面去朦胧还要用同一张图。
+                // 放在分支外是硬性要求——分支内 tex2D 的隐式梯度是未定义的
+                half3 blurC = tex2D(_BlurTex, uv).rgb;
                 // 关掉时 C# 端把 _BlurTex 指向原图、_BloomTex 指向纯黑，所以无条件执行
-                col = lerp(col, tex2D(_BlurTex, uv).rgb, blurMix);
+                col = lerp(col, blurC, blurMix);
                 col += tex2D(_BloomTex, uv).rgb * _BloomIntensity;   // Bloom 在线性空间相加才正确
 
                 // LOG 解码必须在最前面：素材还是 LOG 编码时，
                 // 曝光、白平衡这些线性运算的前提根本不成立
                 col = DecodeLog(col, _LogMode);
                 col = ApplyColorMatrix(col);
+
+                // 去朦胧要在线性空间、且在曝光白平衡之前做：
+                // 散射是发生在镜头之前的物理过程，先把它解掉，后面的校色才是在真实景物上调。
+                //
+                // 大气光估计要和 col 处在同一个空间，所以模糊值也得过一遍解码和校色矩阵。
+                // 矩阵是线性变换、和模糊可交换，所以「先模糊再乘矩阵」跟「先乘矩阵再模糊」等价
+                if (abs(_Dehaze) > 0.001h)
+                    col = ApplyDehaze(col, ApplyColorMatrix(DecodeLog(blurC, _LogMode)), _Dehaze);
 
                 col = GradeLinear(col);
 
@@ -261,6 +275,12 @@ Shader "Hidden/Love/VideoGrade"
                 g = ApplyContrastAndTone(g);
                 g = ApplySaturationAndHue(g);
                 g = max(g, 0);
+
+                // HSL 混合器排在六条曲线之前：它是"按色带粗调"，
+                // 六条曲线是"按色相精修"，先粗后精和实际操作顺序一致
+                #ifdef LOVE_HSL_ON
+                    g = ApplyHslMixer(g);
+                #endif
 
                 #ifdef LOVE_SIXCURVE_ON
                     g = ApplySixCurves(g);
@@ -339,6 +359,52 @@ Shader "Hidden/Love/VideoGrade"
                 }
 
                 return half4(result, 1);
+            }
+            ENDCG
+        }
+
+        // ---------------- Pass 5：几何（裁剪 / 拉直 / 90 度旋转 / 翻转）----------------
+        // 跑在整条管线最前面。裁剪之后暗角、Power Window、颗粒都按新构图走，
+        // 这和 Camera Raw 一致——裁完图，暗角跟着新的画面中心，而不是原图中心。
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex VertFullscreen
+            #pragma fragment frag
+            #pragma target 3.0
+            #include "VideoGradeCommon.cginc"
+
+            float4 _CropRect;     // xy = 裁剪框左下角，zw = 尺寸，都是归一化
+            float2 _Straighten;   // x = cos, y = sin
+            float4 _GeoFlags;     // x=水平翻转 y=垂直翻转 z=90度档位(0~3) w=旋转后画面的宽高比
+
+            half4 frag (v2f i) : SV_Target
+            {
+                // 输出 uv → 裁剪框中心的偏移
+                float2 d = (i.uv - 0.5) * _CropRect.zw;
+
+                // uv 空间不是各向同性的，直接在里面旋转会把画面切变成平行四边形。
+                // 先按宽高比拉成正方形像素，转完再拉回来。
+                d.x *= _GeoFlags.w;
+                d = float2(d.x * _Straighten.x - d.y * _Straighten.y,
+                           d.x * _Straighten.y + d.y * _Straighten.x);
+                d.x /= _GeoFlags.w;
+
+                float2 uv = _CropRect.xy + _CropRect.zw * 0.5 + d;
+
+                // 正向是 显示 = 旋转(翻转(源))，所以反解要先撤旋转再撤翻转
+                int r = (int)(_GeoFlags.z + 0.5);
+                if (r == 1)      uv = float2(1.0 - uv.y, uv.x);          // 撤顺时针 90
+                else if (r == 2) uv = float2(1.0 - uv.x, 1.0 - uv.y);
+                else if (r == 3) uv = float2(uv.y, 1.0 - uv.x);
+
+                if (_GeoFlags.x > 0.5) uv.x = 1.0 - uv.x;
+                if (_GeoFlags.y > 0.5) uv.y = 1.0 - uv.y;
+
+                // 拉直会把画面转出边界。露出来的部分给黑，
+                // 不能靠 clamp 采样——那会把边缘像素拉成一条条色带
+                float2 inside = step(0.0, uv) * step(uv, 1.0);
+                return tex2D(_MainTex, saturate(uv)) * (inside.x * inside.y);
             }
             ENDCG
         }

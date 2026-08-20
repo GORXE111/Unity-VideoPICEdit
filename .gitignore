@@ -42,8 +42,8 @@ crashlytics-build.properties
 
 # ---------------- 大文件走 Git LFS ----------------
 # 模型、视频、音频由 .gitattributes 交给 LFS 托管，不在这里排除。
-# 单文件超 100 MB 的限制对 LFS 不适用，但 GitHub 免费额度只有
-# 1 GB 存储 + 1 GB/月流量，这批文件已经接近上限。
+# 单文件超 100 MB 的限制对 LFS 不适用。GitHub Free 的 LFS 额度是
+# 10 GiB 存储 + 10 GiB/月流量，当前用掉约 1 GB。
 
 # ---------------- 系统垃圾 ----------------
 .DS_Store

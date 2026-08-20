@@ -106,7 +106,10 @@ StoryDirector（总导演，协程状态机）
 VideoGradeSettings   纯数据（JsonUtility 可序列化，含 AnimationCurve），带 Lerp
 VideoGradeRenderer   渲染核心，普通 C# 类 —— 不依赖 MonoBehaviour / 场景 / Play 模式
 GradePresetStore     预设读写，编辑器和运行时共用
-VideoGrade.shader    5 个 Pass，算法在 4 个 .cginc 里
+VideoGrade.shader    6 个 Pass，算法在 4 个 .cginc 里
+AutoTone             按直方图给一组起手曝光与色阶
+WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
+SonyRawImporter      索尼 ARW 解码（编辑器侧，只支持未压缩）
 ```
 
 `VideoGradeRenderer.Render(任意Texture, 任意RenderTexture, settings, options)`。
@@ -131,9 +134,19 @@ VideoGrade.shader    5 个 Pass，算法在 4 个 .cginc 里
 - 关掉的功能靠 `shader_feature_local` 在编译期消失（CURVE / SECONDARY / LUT / SIXCURVE）。
 - 细节层和两条模糊链都按需构建，参数为 0 时整趟跳过。
 
-**色彩空间约定**：曝光、白平衡、Bloom、色调映射、**校色矩阵**在**线性空间**做；
-色阶、Lift/Gamma/Gain、对比度、饱和度、曲线、LUT 转到 **gamma 空间**做。
+**色彩空间约定**：曝光、白平衡、**去朦胧**、Bloom、色调映射、**校色矩阵**在**线性空间**做；
+色阶、Lift/Gamma/Gain、对比度、饱和度、曲线、**HSL 八色带**、LUT 转到 **gamma 空间**做。
 Shader 末尾必须 `GammaToLinearSpace` 还原，因为写回 sRGB RT 时 Unity 会自己编码。
+
+**几何 Pass（裁剪 / 拉直 / 90 度旋转 / 翻转）跑在整条管线最前面**，所以暗角、
+Power Window、颗粒都按裁剪后的构图走——和 Camera Raw 一致。
+`VideoGradeSettings.DisplayUvToSource` 是它的 C# 镜像，画布上的吸管和色卡角点靠它把
+屏幕坐标反解回源图；**改一边就必须改另一边**，否则取色会取到别处，而偏移往往不大、
+肉眼不容易发现。
+
+**管线全程 ARGB32**，所以源图给到 8bit sRGB 就够——RAW 解码直接输出 `RGBA32` 不算浪费，
+更高位深也会在第一次 Blit 时被量化掉。真要吃满 14bit 得把所有临时 RT 换成 ARGBHalf，
+那对 6100 万像素的素材是每张几百 MB。
 
 ### AI 蒙版（可选依赖）
 
@@ -167,6 +180,12 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
 - **`Undo.RecordObject` 必须在改动之前调用**，事后记录存进撤销栈的是新状态，Ctrl+Z 回不去。
   拖拽类控件在 `MouseDown` 时登记一次即可。
 - **`EditorGUIUtility.currentViewWidth` 在 `BeginArea` 里返回的是整个窗口宽度**，不是面板宽度。
+- **`Texture2D.GetPixels` 在大图上是内存炸弹**。6100 万像素 = 将近 1GB 的 `Color[]`。
+  要统计就先 Blit 到小 RT 再回读，别直接取全图。
+- **索尼的 `WB_RGGBLevels` 顺序是 R,G1,G2,B**，蓝色在第四位。当成 R,G,B,G2 读的话画面
+  明显偏黄，但绿色是对的，第一眼不容易断定是白平衡问题。
+- **数组类型的新字段要防 null**。`hslHue` 这些是后加的，早先存的 `grade.json` 里没有，
+  `JsonUtility` 读进来可能是 null 或长度不对。
 - **PlayerPrefs 会悄悄盖掉 Inspector 配置**。`AudioManager.rememberPlayerSettings` 和
   `VideoPostProcessor.loadOnStart` 关掉时才以 Inspector / 场景为准。
 - **渐变插值的起点要先快照**。直接拿被写入的对象当插值基准，每帧基准都在动，

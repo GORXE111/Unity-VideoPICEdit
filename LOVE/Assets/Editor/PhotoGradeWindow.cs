@@ -76,6 +76,16 @@ namespace Love.EditorTools
         bool _spaceDown;      // 空格临时切换成抓手，和 PS 一致
         bool _holdCompare;    // 按住反斜杠看原图
 
+        // 裁剪。开着的时候画布故意显示未裁剪的整幅——
+        // 看不见要裁掉什么，就没法判断裁得对不对
+        [SerializeField] bool _cropMode;
+        int _cropDrag = -1;            // -1 没在拖 0..3 角 4..7 边 8 整体平移
+        Vector2 _cropDragOrigin;
+        Vector4 _cropAtDragStart;      // 按下那一刻的 x/y/w/h，全程以它为基准算增量
+
+        // 白平衡吸管：点画面上一处本该是中性灰的地方
+        bool _pickWb;
+
         // AI 主体蒙版。整块包在条件编译里，没装 Sentis 时修图台照常可用
 #if LOVE_SENTIS
         AiMaskGenerator _maskGen;
@@ -308,6 +318,33 @@ namespace Love.EditorTools
             bool film = GUILayout.Toggle(_filmVisible, "胶片条", EditorStyles.toolbarButton, GUILayout.Width(52f));
             if (film != _filmVisible) { _filmVisible = film; SaveLayout(); }
 
+            GUILayout.Space(12f);
+
+            using (new EditorGUI.DisabledScope(_full == null))
+            {
+                bool crop = GUILayout.Toggle(_cropMode, "裁剪", EditorStyles.toolbarButton, GUILayout.Width(44f));
+                if (crop != _cropMode)
+                {
+                    _cropMode = crop;
+                    // 进裁剪模式时如果还没框过，先给一个整幅的框，不然没有东西可拖
+                    if (crop && !_settings.cropEnabled)
+                    {
+                        Undo.RecordObject(this, "开始裁剪");
+                        _settings.cropEnabled = true;
+                        _settings.ResetCrop();
+                    }
+                    _fitPending = true;
+                    _dirty = true;
+                }
+
+                // 吸管是一次性的：取完一次就自己关掉，免得下一次平移画面被当成取色
+                bool wb = GUILayout.Toggle(_pickWb, "白平衡吸管", EditorStyles.toolbarButton, GUILayout.Width(80f));
+                if (wb != _pickWb) { _pickWb = wb; Repaint(); }
+
+                if (GUILayout.Button("自动色调", EditorStyles.toolbarButton, GUILayout.Width(64f)))
+                    _pendingAction = AutoToneCurrent;
+            }
+
             GUILayout.FlexibleSpace();
 
             // 图片信息放这里而不是盖在画面上——画布要保持干净，只有被处理过的图
@@ -354,12 +391,15 @@ namespace Love.EditorTools
             EditorGUILayout.Space(8f);
             DrawLutBar();
             EditorGUILayout.Space(8f);
+            DrawRawBar();
+            EditorGUILayout.Space(8f);
             DrawExportBar();
             EditorGUILayout.Space(6f);
 
             EditorGUI.BeginChangeCheck();
             _gui.PreviewTexture = _preview;
             _gui.PanelWidth = r.width - 8f;
+            _gui.SourceSize = _full != null ? new Vector2Int(_full.width, _full.height) : Vector2Int.zero;
             _gui.Draw(_settings, this);
             // 只有参数真的动了才重渲染。缩放平移不该触发全分辨率重算。
             // 转盘弹窗是跨帧的，改动落在 OnGUI 之外，BeginChangeCheck 捕捉不到，所以要单独问一次
@@ -418,8 +458,11 @@ namespace Love.EditorTools
 
             if (_fitPending) { FitToView(r); _fitPending = false; }
 
-            float w = _full.width * _zoom;
-            float h = _full.height * _zoom;
+            // 裁剪 / 旋转会改变画面尺寸，缩放和居中都要按变换之后的来算，
+            // 否则一旦转过 90 度，图就会被拉成错误的长宽比
+            CanvasSize(out int cw, out int chh);
+            float w = cw * _zoom;
+            float h = chh * _zoom;
             var img = new Rect(r.center.x - w * 0.5f + _pan.x, r.center.y - h * 0.5f + _pan.y, w, h);
 
             if (Event.current.type == EventType.Repaint && _preview != null)
@@ -445,15 +488,41 @@ namespace Love.EditorTools
                 GUI.EndGroup();
             }
 
+            if (_cropMode) DrawCropOverlay(r, img);
             if (_chartMode) DrawChartOverlay(r, img);
+            HandlePickInput(img);
             HandleDragAndDrop(r);
         }
 
         void FitToView(Rect r)
         {
             if (_full == null) return;
-            _zoom = Mathf.Min(r.width / _full.width, r.height / _full.height) * 0.95f;
+            CanvasSize(out int w, out int h);
+            _zoom = Mathf.Min(r.width / w, r.height / h) * 0.95f;
             _pan = Vector2.zero;
+        }
+
+        /// <summary>
+        /// 画布上这一幅的像素尺寸。裁剪模式下故意返回未裁剪的整幅——
+        /// 那时候要让用户看见自己正在切掉哪一块。
+        /// </summary>
+        void CanvasSize(out int w, out int h)
+        {
+            if (_full == null) { w = h = 1; return; }
+            bool prev = _settings.cropEnabled;
+            if (_cropMode) _settings.cropEnabled = false;
+            _settings.OutputSize(_full.width, _full.height, out w, out h);
+            _settings.cropEnabled = prev;
+        }
+
+        /// <summary>画布 uv -> 源图 uv。裁剪模式下画布显示的是整幅，换算要跟着变。</summary>
+        Vector2 CanvasUvToSource(Vector2 uv)
+        {
+            bool prev = _settings.cropEnabled;
+            if (_cropMode) _settings.cropEnabled = false;
+            var srcUv = _settings.DisplayUvToSource(uv, _full.width, _full.height);
+            _settings.cropEnabled = prev;
+            return srcUv;
         }
 
         void HandlePreviewInput(Rect r)
@@ -489,8 +558,9 @@ namespace Love.EditorTools
 
             if (_spaceDown) EditorGUIUtility.AddCursorRect(r, MouseCursor.Pan);
             if (!r.Contains(e.mousePosition)) return;
-            // 标定模式下正在拖角点，别让画布平移抢走事件
+            // 标定 / 裁剪正在拖控制点时，别让画布平移抢走事件
             if (_chartMode && _chartDragIndex >= 0) return;
+            if (_cropMode && _cropDrag >= 0) return;
 
             if (e.type == EventType.ScrollWheel)
             {
@@ -541,12 +611,13 @@ namespace Love.EditorTools
         {
             if (_full == null) return;
 
-            bool sizeChanged = _preview == null || _preview.width != _full.width || _preview.height != _full.height;
+            CanvasSize(out int pw, out int ph);
+            bool sizeChanged = _preview == null || _preview.width != pw || _preview.height != ph;
 
             if (sizeChanged)
             {
                 ReleasePreview();
-                _preview = new RenderTexture(_full.width, _full.height, 0,
+                _preview = new RenderTexture(pw, ph, 0,
                                              RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default)
                 { name = "PhotoGradePreview", hideFlags = HideFlags.HideAndDontSave };
                 _preview.Create();
@@ -556,6 +627,11 @@ namespace Love.EditorTools
             if (r == null) return;
 
             r.GrainSeed = 7f;   // 图片用固定种子，否则每次重绘噪点都在跳，导出也和预览对不上
+
+            // 裁剪模式下临时关掉裁剪：画布要显示整幅，裁剪框以叠加层的形式画在上面
+            bool prevCrop = _settings.cropEnabled;
+            if (_cropMode) _settings.cropEnabled = false;
+
             r.Render(_full, _preview, _settings, new VideoGradeRenderer.Options
             {
                 bypass = _bypass,
@@ -565,6 +641,8 @@ namespace Love.EditorTools
                 lut = _lut,
                 lutAmount = _lutAmount,
             });
+
+            _settings.cropEnabled = prevCrop;
             _dirty = false;
         }
 
@@ -668,7 +746,7 @@ namespace Love.EditorTools
         void AddFolder(string dir)
         {
             var files = new List<string>();
-            foreach (var pattern in new[] { "*.png", "*.jpg", "*.jpeg" })
+            foreach (var pattern in new[] { "*.png", "*.jpg", "*.jpeg", "*.arw" })
                 files.AddRange(Directory.GetFiles(dir, pattern, SearchOption.TopDirectoryOnly));
             files.Sort();
             foreach (var f in files) AddFile(f);
@@ -695,7 +773,11 @@ namespace Love.EditorTools
                     if (_pendingImports.Count > 3 && EditorUtility.DisplayCancelableProgressBar(
                             "载入图片", Path.GetFileName(path), (float)i / _pendingImports.Count)) break;
 
-                    var full = LoadTextureFromFile(path);
+                    // 缩略图不需要全解 RAW：一张 6100 万像素的 ARW 要十秒，
+                    // 而机内预览是现成的，128 像素的缩略图用它完全够
+                    var full = SonyRawImporter.IsRaw(path)
+                        ? SonyRawImporter.LoadPreviewOnly(path) ?? LoadTextureFromFile(path)
+                        : LoadTextureFromFile(path);
                     if (full == null) { Debug.LogError($"[修图台] 读不了这个文件：{path}"); continue; }
 
                     _entries.Add(new Entry
@@ -732,11 +814,13 @@ namespace Love.EditorTools
         static bool IsImage(string path)
         {
             string ext = Path.GetExtension(path).ToLowerInvariant();
-            return ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+            return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".arw";
         }
 
         static Texture2D LoadTextureFromFile(string path)
         {
+            if (SonyRawImporter.IsRaw(path)) return LoadRaw(path);
+
             try
             {
                 // linear:false —— png/jpg 里存的是 sRGB，按 sRGB 采样管线才对
@@ -747,6 +831,62 @@ namespace Love.EditorTools
             }
             catch (System.Exception e) { Debug.LogError($"[修图台] 读取失败：{e.Message}"); }
             return null;
+        }
+
+        // RAW 的解码选项。存 EditorPrefs：这是「怎么读文件」的偏好，
+        // 不属于调色参数，不该跟着预设走
+        const string PrefRawHalf = "PhotoGrade.rawHalfSize";
+        const string PrefRawAuto = "PhotoGrade.rawAutoExposure";
+        const string PrefRawMat  = "PhotoGrade.rawColorMatrix";
+
+        static SonyRawImporter.Options RawOptions => new SonyRawImporter.Options
+        {
+            downscale = EditorPrefs.GetBool(PrefRawHalf, false) ? 2 : 1,
+            autoExposure = EditorPrefs.GetBool(PrefRawAuto, true),
+            applyColorMatrix = EditorPrefs.GetBool(PrefRawMat, true),
+        };
+
+        static Texture2D LoadRaw(string path)
+        {
+            var res = SonyRawImporter.Load(path, RawOptions);
+
+            // 解不了原始数据时会退回机内 JPEG 预览，那时 texture 和 error 会同时有值。
+            // 这种情况必须说出来——不然用户拿到的是一张 8bit 的小图却以为是 RAW
+            if (!string.IsNullOrEmpty(res.error))
+            {
+                if (res.texture != null) Debug.LogWarning($"[修图台] {Path.GetFileName(path)}：{res.error}");
+                else Debug.LogError($"[修图台] {Path.GetFileName(path)}：{res.error}");
+            }
+            else if (!string.IsNullOrEmpty(res.info))
+            {
+                Debug.Log($"[修图台] RAW 已解码 {Path.GetFileName(path)}：{res.info}");
+            }
+
+            return res.texture;
+        }
+
+        void DrawRawBar()
+        {
+            EditorGUILayout.LabelField("RAW 解码（索尼 ARW）", EditorStyles.boldLabel);
+
+            PrefToggle("半尺寸导入", PrefRawHalf, false,
+                       "6100 万像素的全尺寸会让每一步都很吃内存。半尺寸直接用 2x2 拜耳块合成，" +
+                       "不做插值，细节反而比全尺寸更干净。");
+            PrefToggle("自动曝光归一化", PrefRawAuto, true,
+                       "把高光推到接近满值。只是一个标量，不是曲线，关掉就是相机的原始电平。");
+            PrefToggle("套用相机色彩矩阵", PrefRawMat, true,
+                       "内置的是 ILCE-7RM4 的系数，其它索尼机身方向对但有偏差。" +
+                       "要准确的颜色，关掉它，用上面的色卡校色解一个属于你这台机器的矩阵。");
+
+            EditorGUILayout.HelpBox("改完要重新导入才生效。压缩 ARW 暂不支持，会退回机内 JPEG 预览。",
+                                    MessageType.None);
+        }
+
+        static void PrefToggle(string label, string key, bool def, string tip)
+        {
+            bool cur = EditorPrefs.GetBool(key, def);
+            bool v = EditorGUILayout.Toggle(new GUIContent(label, tip), cur);
+            if (v != cur) EditorPrefs.SetBool(key, v);
         }
 
         static Texture2D MakeThumbnail(Texture2D src, int maxSize)
@@ -992,6 +1132,11 @@ namespace Love.EditorTools
                 _dirty = true;
             }
 
+            // 角点存在源图 uv 里，而画布显示的是变换后的画面，两者对不上号
+            if (_chartMode && _settings.HasGeometry)
+                EditorGUILayout.HelpBox("画面有裁剪或旋转，色卡角点会和画布对不上。先把「裁剪与旋转」重置再标定。",
+                                        MessageType.Warning);
+
             if (!string.IsNullOrEmpty(_chartStatus))
                 EditorGUILayout.LabelField(_chartStatus, EditorStyles.miniLabel);
         }
@@ -1142,6 +1287,233 @@ namespace Love.EditorTools
 
         #endregion
 
+        #region 裁剪叠加层
+
+        const float CropHandle = 8f;     // 控制点的半边长，像素
+        const float CropGrab = 11f;      // 命中判定半径，比控制点大一圈才好点中
+
+        void DrawCropOverlay(Rect canvas, Rect img)
+        {
+            var box = CropToScreen(img);
+            var e = Event.current;
+
+            if (e.type == EventType.Repaint)
+            {
+                GUI.BeginGroup(canvas);
+                var b = new Rect(box.x - canvas.x, box.y - canvas.y, box.width, box.height);
+                var m = new Rect(img.x - canvas.x, img.y - canvas.y, img.width, img.height);
+
+                // 框外压暗，一眼看出要裁掉哪些。四块拼起来而不是画一个带洞的矩形——
+                // IMGUI 没有洞这种东西
+                var dim = new Color(0f, 0f, 0f, 0.55f);
+                EditorGUI.DrawRect(new Rect(m.x, m.y, m.width, b.y - m.y), dim);
+                EditorGUI.DrawRect(new Rect(m.x, b.yMax, m.width, m.yMax - b.yMax), dim);
+                EditorGUI.DrawRect(new Rect(m.x, b.y, b.x - m.x, b.height), dim);
+                EditorGUI.DrawRect(new Rect(b.xMax, b.y, m.xMax - b.xMax, b.height), dim);
+
+                // 三分线：构图参考，Lightroom 的裁剪框也是这个
+                var thin = new Color(1f, 1f, 1f, 0.28f);
+                for (int i = 1; i <= 2; i++)
+                {
+                    EditorGUI.DrawRect(new Rect(b.x + b.width * i / 3f, b.y, 1f, b.height), thin);
+                    EditorGUI.DrawRect(new Rect(b.x, b.y + b.height * i / 3f, b.width, 1f), thin);
+                }
+
+                var line = new Color(1f, 1f, 1f, 0.9f);
+                EditorGUI.DrawRect(new Rect(b.x, b.y, b.width, 1f), line);
+                EditorGUI.DrawRect(new Rect(b.x, b.yMax - 1f, b.width, 1f), line);
+                EditorGUI.DrawRect(new Rect(b.x, b.y, 1f, b.height), line);
+                EditorGUI.DrawRect(new Rect(b.xMax - 1f, b.y, 1f, b.height), line);
+
+                foreach (var h in HandlePoints(b))
+                    EditorGUI.DrawRect(new Rect(h.x - CropHandle * 0.5f, h.y - CropHandle * 0.5f,
+                                                CropHandle, CropHandle), line);
+
+                GUI.EndGroup();
+                return;
+            }
+
+            if (e.type == EventType.MouseDown && e.button == 0 && canvas.Contains(e.mousePosition))
+            {
+                int hit = HitTest(box, e.mousePosition);
+                if (hit < 0) return;
+
+                // Undo 要在改之前记，记在后面 Ctrl+Z 撤不回来
+                Undo.RecordObject(this, "裁剪");
+                _cropDrag = hit;
+                _cropDragOrigin = e.mousePosition;
+                _cropAtDragStart = new Vector4(_settings.cropX, _settings.cropY,
+                                               _settings.cropW, _settings.cropH);
+                e.Use();
+            }
+            else if (e.type == EventType.MouseDrag && _cropDrag >= 0)
+            {
+                // 屏幕 y 向下、uv y 向上，所以纵向要取反
+                var d = e.mousePosition - _cropDragOrigin;
+                ApplyCropDrag(new Vector2(d.x / Mathf.Max(img.width, 1f),
+                                          -d.y / Mathf.Max(img.height, 1f)));
+                _dirty = true;
+                e.Use();
+                Repaint();
+            }
+            else if (e.type == EventType.MouseUp && _cropDrag >= 0)
+            {
+                _cropDrag = -1;
+                e.Use();
+            }
+        }
+
+        /// <summary>裁剪框（源图归一化，y 向上）换算成屏幕矩形（y 向下）。</summary>
+        Rect CropToScreen(Rect img)
+        {
+            float x = img.x + _settings.cropX * img.width;
+            float y = img.y + (1f - _settings.cropY - _settings.cropH) * img.height;
+            return new Rect(x, y, _settings.cropW * img.width, _settings.cropH * img.height);
+        }
+
+        /// <summary>八个控制点，顺序和 HitTest / ApplyCropDrag 里的编号一一对应。</summary>
+        static Vector2[] HandlePoints(Rect b) => new[]
+        {
+            new Vector2(b.x, b.yMax), new Vector2(b.xMax, b.yMax),      // 0 左下 1 右下
+            new Vector2(b.xMax, b.y), new Vector2(b.x, b.y),            // 2 右上 3 左上
+            new Vector2(b.x, b.center.y), new Vector2(b.xMax, b.center.y),   // 4 左 5 右
+            new Vector2(b.center.x, b.yMax), new Vector2(b.center.x, b.y),   // 6 下 7 上
+        };
+
+        static int HitTest(Rect box, Vector2 mouse)
+        {
+            var pts = HandlePoints(box);
+            for (int i = 0; i < pts.Length; i++)
+                if (Vector2.Distance(pts[i], mouse) <= CropGrab) return i;
+            return box.Contains(mouse) ? 8 : -1;
+        }
+
+        void ApplyCropDrag(Vector2 d)
+        {
+            const float MinSize = 0.03f;
+            var c = _cropAtDragStart;
+            float x = c.x, y = c.y, w = c.z, h = c.w;
+
+            if (_cropDrag == 8)
+            {
+                // 整体平移：框大小不变，只把位置夹在画面内
+                x = Mathf.Clamp(c.x + d.x, 0f, 1f - w);
+                y = Mathf.Clamp(c.y + d.y, 0f, 1f - h);
+            }
+            else
+            {
+                bool left   = _cropDrag == 0 || _cropDrag == 3 || _cropDrag == 4;
+                bool right  = _cropDrag == 1 || _cropDrag == 2 || _cropDrag == 5;
+                bool bottom = _cropDrag == 0 || _cropDrag == 1 || _cropDrag == 6;
+                bool top    = _cropDrag == 2 || _cropDrag == 3 || _cropDrag == 7;
+
+                // 拖左/下边时对边固定，所以要同时改起点和尺寸
+                if (left)   { float nx = Mathf.Clamp(c.x + d.x, 0f, c.x + c.z - MinSize); w = c.x + c.z - nx; x = nx; }
+                if (right)  { w = Mathf.Clamp(c.z + d.x, MinSize, 1f - c.x); }
+                if (bottom) { float ny = Mathf.Clamp(c.y + d.y, 0f, c.y + c.w - MinSize); h = c.y + c.w - ny; y = ny; }
+                if (top)    { h = Mathf.Clamp(c.w + d.y, MinSize, 1f - c.y); }
+            }
+
+            _settings.cropX = x; _settings.cropY = y;
+            _settings.cropW = w; _settings.cropH = h;
+        }
+
+        #endregion
+
+        #region 白平衡吸管与自动色调
+
+        void HandlePickInput(Rect img)
+        {
+            if (!_pickWb || _full == null) return;
+
+            EditorGUIUtility.AddCursorRect(img, MouseCursor.ArrowPlus);
+
+            var e = Event.current;
+            if (e.type != EventType.MouseDown || e.button != 0 || !img.Contains(e.mousePosition)) return;
+
+            float u = (e.mousePosition.x - img.x) / Mathf.Max(img.width, 1f);
+            float v = 1f - (e.mousePosition.y - img.y) / Mathf.Max(img.height, 1f);
+
+            PickWhiteBalance(new Vector2(u, v));
+
+            _pickWb = false;      // 取一次就退出，免得接下来平移画面又被当成取色
+            e.Use();
+            Repaint();
+        }
+
+        void PickWhiteBalance(Vector2 canvasUv)
+        {
+            var uv = CanvasUvToSource(canvasUv);
+            if (uv.x < 0f || uv.x > 1f || uv.y < 0f || uv.y > 1f) return;
+
+            int px = Mathf.Clamp(Mathf.RoundToInt(uv.x * (_full.width - 1)), 0, _full.width - 1);
+            int py = Mathf.Clamp(Mathf.RoundToInt(uv.y * (_full.height - 1)), 0, _full.height - 1);
+
+            // 取 5x5 的平均。单个像素上的噪点足以让解出来的色温差出几百 K，
+            // 而用户点的时候本来就是在指一片区域而不是一个点
+            Vector3 sum = Vector3.zero;
+            int n = 0;
+            for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++)
+            {
+                int x = px + dx, y = py + dy;
+                if (x < 0 || y < 0 || x >= _full.width || y >= _full.height) continue;
+                var c = _full.GetPixel(x, y);
+                // GetPixel 给的是贴图里存的值，也就是 gamma 空间；白平衡是线性空间的运算
+                sum += new Vector3(Mathf.GammaToLinearSpace(c.r),
+                                   Mathf.GammaToLinearSpace(c.g),
+                                   Mathf.GammaToLinearSpace(c.b));
+                n++;
+            }
+            if (n == 0) return;
+
+            WhiteBalancePicker.Solve(sum / n, out float temp, out float tint);
+
+            Undo.RecordObject(this, "白平衡吸管");
+            _settings.temperature = temp;
+            _settings.tint = tint;
+            _dirty = true;
+        }
+
+        /// <summary>
+        /// 排队到 Update 里跑，因为里面有 Blit 和回读——这两样绝不能出现在 OnGUI 里。
+        ///
+        /// 统计走缩略图而不是原图：6100 万像素的 GetPixels 会分配将近 1GB 的 Color[]，
+        /// 而判断曝光和两端分位数根本不需要那个精度。
+        /// </summary>
+        void AutoToneCurrent()
+        {
+            if (_full == null) return;
+
+            const int N = 512;
+            var rt = RenderTexture.GetTemporary(N, N, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+            var small = new Texture2D(N, N, TextureFormat.RGBA32, false, false)
+            { hideFlags = HideFlags.HideAndDontSave };
+
+            try
+            {
+                Graphics.Blit(_full, rt);
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                small.ReadPixels(new Rect(0f, 0f, N, N), 0, 0, false);
+                small.Apply(false, false);
+                RenderTexture.active = prev;
+
+                Undo.RecordObject(this, "自动色调");
+                AutoTone.Apply(small.GetPixels(), _settings);
+                _dirty = true;
+            }
+            finally
+            {
+                RenderTexture.ReleaseTemporary(rt);
+                DestroyImmediate(small);
+            }
+
+            Repaint();
+        }
+
+        #endregion
+
         #region 导出
 
         void DrawExportBar()
@@ -1218,9 +1590,12 @@ namespace Love.EditorTools
             var r = Renderer;
             if (r == null || tex == null) return false;
 
-            var rt = RenderTexture.GetTemporary(tex.width, tex.height, 0,
+            // 导出永远按真实的裁剪结果走，和画布当前是不是裁剪模式无关
+            _settings.OutputSize(tex.width, tex.height, out int ow, out int oh);
+
+            var rt = RenderTexture.GetTemporary(ow, oh, 0,
                                                 RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
-            var readback = new Texture2D(tex.width, tex.height, TextureFormat.RGBA32, false, false)
+            var readback = new Texture2D(ow, oh, TextureFormat.RGBA32, false, false)
             { hideFlags = HideFlags.HideAndDontSave };
 
             try
@@ -1235,7 +1610,7 @@ namespace Love.EditorTools
 
                 var prev = RenderTexture.active;
                 RenderTexture.active = rt;
-                readback.ReadPixels(new Rect(0f, 0f, tex.width, tex.height), 0, 0, false);
+                readback.ReadPixels(new Rect(0f, 0f, ow, oh), 0, 0, false);
                 readback.Apply(false, false);
                 RenderTexture.active = prev;
 

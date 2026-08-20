@@ -74,6 +74,74 @@ half3 ApplySixCurves (half3 c)
     return HsvToRgb(hsv);
 }
 
+// ---- HSL 八色带混合器 ----
+// 八个色带 x 三个属性。A 装前四个色带，B 装后四个。
+half4 _HslHueA, _HslHueB;
+half4 _HslSatA, _HslSatB;
+half4 _HslLumA, _HslLumB;
+
+// 三角基权重：在自己的中心色相处为 1，到左右相邻中心处衰减到 0。
+// 相邻两条恒好凑成 1（单位分解），所以色带交界处不会忽强忽弱。
+half HslWeight (half h, half prev, half cen, half next)
+{
+    half d  = h - cen;      d  -= round(d);     // 色相是环形的，折算到 ±0.5
+    half lo = prev - cen;   lo -= round(lo);    // 负
+    half hi = next - cen;   hi -= round(hi);    // 正
+    return d < 0 ? saturate(1.0h - d / lo) : saturate(1.0h - d / hi);
+}
+
+#define HSL_BAND(pi, ci, ni, hv, sv, lv) { \
+    half w = HslWeight(h, pi, ci, ni);        \
+    dh += w * (hv); ds += w * (sv); dl += w * (lv); }
+
+half3 ApplyHslMixer (half3 c)
+{
+    half3 hsv = RgbToHsv(saturate(c));
+    half h = hsv.x;
+    half dh = 0.0h, ds = 0.0h, dl = 0.0h;
+
+    // 中心色相和 C# 端的 VideoGradeSettings.HslCenters 一一对应，改一边必须改另一边
+    const half C0 = 0.0h,     C1 = 0.08333h, C2 = 0.16667h, C3 = 0.33333h;
+    const half C4 = 0.5h,     C5 = 0.66667h, C6 = 0.77778h, C7 = 0.88889h;
+
+    HSL_BAND(C7, C0, C1, _HslHueA.x, _HslSatA.x, _HslLumA.x)   // 红
+    HSL_BAND(C0, C1, C2, _HslHueA.y, _HslSatA.y, _HslLumA.y)   // 橙
+    HSL_BAND(C1, C2, C3, _HslHueA.z, _HslSatA.z, _HslLumA.z)   // 黄
+    HSL_BAND(C2, C3, C4, _HslHueA.w, _HslSatA.w, _HslLumA.w)   // 绿
+    HSL_BAND(C3, C4, C5, _HslHueB.x, _HslSatB.x, _HslLumB.x)   // 青
+    HSL_BAND(C4, C5, C6, _HslHueB.y, _HslSatB.y, _HslLumB.y)   // 蓝
+    HSL_BAND(C5, C6, C7, _HslHueB.z, _HslSatB.z, _HslLumB.z)   // 紫
+    HSL_BAND(C6, C7, C0, _HslHueB.w, _HslSatB.w, _HslLumB.w)   // 品红
+
+    // 近乎中性的像素没有可靠的色相——RgbToHsv 对灰色返回的 h 基本是噪声。
+    // 不加这道闸门的话，灰墙、雪地、白衬衫会被判进某个色带然后被染上颜色。
+    half gate = smoothstep(0.02h, 0.15h, hsv.y);
+    dh *= gate; ds *= gate; dl *= gate;
+
+    hsv.x = frac(hsv.x + dh * 0.1h + 1.0h);          // ±0.1 圈 = ±36 度
+    hsv.y = saturate(hsv.y * (1.0h + ds));
+    hsv.z = saturate(hsv.z * (1.0h + dl * 0.6h));    // 明度收着点，全幅太容易过
+    return HsvToRgb(hsv);
+}
+
+#undef HSL_BAND
+
+// ---- 去朦胧 ----
+// 大气散射模型：看到的 I = J*t + A*(1-t)。J 是无雾的真实景物，A 是大气光，
+// t 是透射率。这里把 A 取成局部模糊值——那正是"糊在景物上的那层纱"——
+// 反解得 J = (I - A)/t + A，形式上就是绕局部均值的对比度拉伸，
+// 但强度由 t 自适应：雾越浓的地方（暗通道越亮）t 越小，拉得越狠。
+//
+// 用模糊值而不是逐像素窗口最小值，是为了绕开暗通道先验典型的边缘光晕：
+// 均值是平滑的，最小值在物体边界上会跳变。
+half3 ApplyDehaze (half3 col, half3 atmo, half amount)
+{
+    half dark = min(min(atmo.r, atmo.g), atmo.b);
+    half t = max(1.0h - 0.95h * saturate(dark), 0.15h);   // 下限防止除爆
+    half3 j = (col - atmo) / t + atmo;
+    return max(lerp(col, j, amount), 0);                  // amount 为负 = 反向加雾
+}
+
 // 二级校色：遮罩内的调整
 half   _SecExposure;
 half   _SecContrast;

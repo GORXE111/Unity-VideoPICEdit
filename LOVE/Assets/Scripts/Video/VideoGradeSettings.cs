@@ -51,6 +51,28 @@ namespace Love.Video
         public bool colorMatrixEnabled = false;
         public float[] colorMatrix = IdentityMatrix();
 
+        // ---------- 裁剪 / 旋转 ----------
+        // 裁剪框定义在「已做过 90 度旋转和翻转」的图像空间里，
+        // 也就是用户在画布上看到的那个方向——所见即所裁。
+        public bool cropEnabled = false;
+        public float cropX = 0f, cropY = 0f;    // 裁剪框左下角，归一化
+        public float cropW = 1f, cropH = 1f;    // 裁剪框尺寸，归一化
+        public float straighten = 0f;           // -45 .. 45 度，绕裁剪框中心转
+        public int rotate90 = 0;                // 0..3，90 度步进
+        public bool flipH = false, flipV = false;
+
+        // ---------- 去朦胧 ----------
+        // 正=去雾，负=加雾。走大气散射模型，见 shader 里的 ApplyDehaze
+        public float dehaze = 0f;               // -1 .. 1
+
+        // ---------- HSL 八色带混合器 ----------
+        // 八个色带各三根滑条。表达能力不如六条曲线，但调天空、调肤色时
+        // 拖一根滑条就完事，比在曲线上找控制点快得多——这是使用频率最高的面板。
+        public bool hslEnabled = false;
+        public float[] hslHue = new float[HslBandCount];   // -1..1，映射到 ±36 度
+        public float[] hslSat = new float[HslBandCount];   // -1..1
+        public float[] hslLum = new float[HslBandCount];   // -1..1
+
         // ---------- 镜头畸变 ----------
         // k1 为负=桶形（广角），为正=枕形（长焦）。
         // AI 图最明显的破绽之一就是完全没有镜头畸变。
@@ -259,6 +281,15 @@ namespace Love.Video
             into.qualSatSoft = Mathf.Lerp(a.qualSatSoft, b.qualSatSoft, t);
             into.qualLumMax = Mathf.Lerp(a.qualLumMax, b.qualLumMax, t);
             into.qualLumSoft = Mathf.Lerp(a.qualLumSoft, b.qualLumSoft, t);
+            into.dehaze = Mathf.Lerp(a.dehaze, b.dehaze, t);
+            into.straighten = Mathf.Lerp(a.straighten, b.straighten, t);
+            into.cropX = Mathf.Lerp(a.cropX, b.cropX, t);
+            into.cropY = Mathf.Lerp(a.cropY, b.cropY, t);
+            into.cropW = Mathf.Lerp(a.cropW, b.cropW, t);
+            into.cropH = Mathf.Lerp(a.cropH, b.cropH, t);
+            LerpBands(a.hslHue, b.hslHue, t, ref into.hslHue);
+            LerpBands(a.hslSat, b.hslSat, t, ref into.hslSat);
+            LerpBands(a.hslLum, b.hslLum, t, ref into.hslLum);
             into.windowCenter = Vector2.Lerp(a.windowCenter, b.windowCenter, t);
             into.windowSize = Vector2.Lerp(a.windowSize, b.windowSize, t);
 
@@ -287,6 +318,31 @@ namespace Love.Video
             into.showMask = d.showMask;
             into.maskInvert = d.maskInvert;
             into.secondaryUseMask = d.secondaryUseMask;
+            into.cropEnabled = d.cropEnabled;
+            into.rotate90 = d.rotate90;
+            into.flipH = d.flipH;
+            into.flipV = d.flipV;
+            into.hslEnabled = d.hslEnabled;
+        }
+
+        static void LerpBands(float[] a, float[] b, float t, ref float[] into)
+        {
+            if (into == null || into.Length != HslBandCount) into = Zero8();
+            for (int i = 0; i < HslBandCount; i++)
+            {
+                float x = a != null && i < a.Length ? a[i] : 0f;
+                float y = b != null && i < b.Length ? b[i] : 0f;
+                into[i] = Mathf.Lerp(x, y, t);
+            }
+        }
+
+        /// <summary>float[] 是引用类型，预设之间必须深拷贝，长度不对时补齐。</summary>
+        static float[] CopyBands(float[] o)
+        {
+            var r = Zero8();
+            if (o != null)
+                for (int i = 0; i < HslBandCount && i < o.Length; i++) r[i] = o[i];
+            return r;
         }
 
         public VideoGradeSettings Clone()
@@ -363,9 +419,106 @@ namespace Love.Video
 
             maskInvert = o.maskInvert; maskLow = o.maskLow; maskHigh = o.maskHigh;
             backgroundBlur = o.backgroundBlur; secondaryUseMask = o.secondaryUseMask;
+
+            cropEnabled = o.cropEnabled;
+            cropX = o.cropX; cropY = o.cropY; cropW = o.cropW; cropH = o.cropH;
+            straighten = o.straighten; rotate90 = o.rotate90;
+            flipH = o.flipH; flipV = o.flipV;
+
+            dehaze = o.dehaze;
+
+            hslEnabled = o.hslEnabled;
+            hslHue = CopyBands(o.hslHue);
+            hslSat = CopyBands(o.hslSat);
+            hslLum = CopyBands(o.hslLum);
         }
 
-        /// <summary>3x4 单位矩阵，行优先：[r0 r1 r2 off | ...]</summary>
+        public const int HslBandCount = 8;
+
+        /// <summary>
+        /// 八个色带的中心色相。刻意不等距——橙色带（肤色）和黄色带挤在前 1/6，
+        /// 因为人眼对这一段最敏感，而绿到蓝之间大片色相实际很少单独去调。
+        /// 这套分法跟 Camera Raw / Lightroom 一致。
+        /// </summary>
+        public static readonly float[] HslCenters =
+        {
+            0f / 360f, 30f / 360f, 60f / 360f, 120f / 360f,
+            180f / 360f, 240f / 360f, 280f / 360f, 320f / 360f,
+        };
+
+        public static readonly string[] HslNames =
+        { "红", "橙", "黄", "绿", "青", "蓝", "紫", "品红" };
+
+        static float[] Zero8() => new float[HslBandCount];
+
+        /// <summary>裁剪 / 旋转 / 翻转里只要有一项不是恒等，就得走几何 Pass。</summary>
+        public bool HasGeometry =>
+            rotate90 != 0 || flipH || flipV || Mathf.Abs(straighten) > 0.001f ||
+            (cropEnabled && (cropX > 0.0005f || cropY > 0.0005f ||
+                             cropW < 0.9995f || cropH < 0.9995f));
+
+        /// <summary>裁剪 / 旋转之后的输出尺寸。导出和预览都要按它来分配 RT。</summary>
+        public void OutputSize(int srcW, int srcH, out int w, out int h)
+        {
+            // 90 / 270 度时长宽互换
+            int bw = (rotate90 & 1) == 0 ? srcW : srcH;
+            int bh = (rotate90 & 1) == 0 ? srcH : srcW;
+
+            float cw = cropEnabled ? Mathf.Clamp(cropW, 0.01f, 1f) : 1f;
+            float ch = cropEnabled ? Mathf.Clamp(cropH, 0.01f, 1f) : 1f;
+
+            w = Mathf.Max(1, Mathf.RoundToInt(bw * cw));
+            h = Mathf.Max(1, Mathf.RoundToInt(bh * ch));
+        }
+
+        /// <summary>
+        /// 把「显示画面」上的 uv 反解回源图 uv。
+        ///
+        /// 这段必须和 VideoGrade.shader 的几何 Pass 逐步对应——画布上的吸管、
+        /// 色卡角点这些都靠它换算，两边一旦不同步，取色就会取到别处的像素，
+        /// 而且因为偏移量往往不大，肉眼还不容易发现。
+        /// </summary>
+        public Vector2 DisplayUvToSource(Vector2 uv, int srcW, int srcH)
+        {
+            float cw = cropEnabled ? Mathf.Clamp(cropW, 0.01f, 1f) : 1f;
+            float ch = cropEnabled ? Mathf.Clamp(cropH, 0.01f, 1f) : 1f;
+            float cx = cropEnabled ? Mathf.Clamp(cropX, 0f, 1f - cw) : 0f;
+            float cy = cropEnabled ? Mathf.Clamp(cropY, 0f, 1f - ch) : 0f;
+
+            int rot = ((rotate90 % 4) + 4) % 4;
+            float rw = (rot & 1) == 0 ? srcW : srcH;
+            float rh = (rot & 1) == 0 ? srcH : srcW;
+            float aspect = rh > 0.5f ? rw / rh : 1f;
+
+            // 裁剪框内的偏移 -> 拉成正方形像素 -> 旋转 -> 拉回去
+            var d = new Vector2((uv.x - 0.5f) * cw, (uv.y - 0.5f) * ch);
+            d.x *= aspect;
+            float rad = straighten * Mathf.Deg2Rad;
+            float co = Mathf.Cos(rad), si = Mathf.Sin(rad);
+            d = new Vector2(d.x * co - d.y * si, d.x * si + d.y * co);
+            d.x /= aspect;
+
+            var t = new Vector2(cx + cw * 0.5f + d.x, cy + ch * 0.5f + d.y);
+
+            // 正向是 显示 = 旋转(翻转(源))，反解要先撤旋转再撤翻转
+            if (rot == 1)      t = new Vector2(1f - t.y, t.x);
+            else if (rot == 2) t = new Vector2(1f - t.x, 1f - t.y);
+            else if (rot == 3) t = new Vector2(t.y, 1f - t.x);
+
+            if (flipH) t.x = 1f - t.x;
+            if (flipV) t.y = 1f - t.y;
+            return t;
+        }
+
+        /// <summary>把裁剪框恢复成整幅，旋转翻转不动。</summary>
+        public void ResetCrop()
+        {
+            cropX = cropY = 0f;
+            cropW = cropH = 1f;
+            straighten = 0f;
+        }
+
+                /// <summary>3x4 单位矩阵，行优先：[r0 r1 r2 off | ...]</summary>
         public static float[] IdentityMatrix() => new float[]
         {
             1f, 0f, 0f, 0f,
