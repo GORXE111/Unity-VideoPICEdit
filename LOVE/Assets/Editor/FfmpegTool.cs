@@ -61,15 +61,22 @@ namespace Love.EditorTools
                 if (File.Exists(p)) return p;
             }
 
-            // 2) WinGet 装的 ffmpeg 不进 PATH，得去它的包目录里翻
+            // 2) WinGet 装的 ffmpeg 有时不进 PATH，去它的包目录里翻。
+            //    不能用 AllDirectories 递归整棵树——实测要 369ms、遍历近 12000 个文件，
+            //    而这个函数会被 OnGUI 间接调到。ffmpeg 的实际位置是
+            //    Packages/<包名>/<版本目录>/bin/ffmpeg.exe，只逐层找这三级
             try
             {
                 string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 string pkgs = System.IO.Path.Combine(local, "Microsoft", "WinGet", "Packages");
                 if (Directory.Exists(pkgs))
                 {
-                    var hits = Directory.GetFiles(pkgs, exe, SearchOption.AllDirectories);
-                    if (hits.Length > 0) return hits[0];
+                    foreach (var pkg in Directory.GetDirectories(pkgs, "*FFmpeg*"))
+                    foreach (var ver in Directory.GetDirectories(pkg))
+                    {
+                        string p = System.IO.Path.Combine(ver, "bin", exe);
+                        if (File.Exists(p)) return p;
+                    }
                 }
             }
             catch { /* 权限或路径问题，当作没找到 */ }
@@ -146,39 +153,16 @@ namespace Love.EditorTools
         }
 
         /// <summary>
-        /// 抓单独一帧，返回裸 RGBA 字节（已经翻成 Unity 的自下而上）。
-        ///
-        /// -ss 放在 -i 前面走的是快速定位：先跳到最近的关键帧再解到目标时刻。
-        /// 现代 ffmpeg 这条路是帧精确的，而且比放在后面快一个数量级。
+        /// 常驻解码进程：从指定时刻起，顺序把裸 RGBA 帧吐到 stdout，一直到片尾。
+        /// 指定宽高时顺带缩放，预览降分辨率靠它。
         /// </summary>
-        public static bool GrabFrame(string src, double seconds, int w, int h, byte[] into)
+        public static Process StartStream(string src, double startSeconds, int width, int height)
         {
-            if (!Available || into == null || into.Length < (long)w * h * 4) return false;
-
-            Process p = null;
-            try
-            {
-                string args = "-hide_banner -loglevel error " +
-                              (seconds > 0.0005 ? $"-ss {seconds.ToString(Inv)} " : "") +
-                              $"-i \"{src}\" -frames:v 1 -vf vflip -f rawvideo -pix_fmt rgba -";
-                p = Start(args, redirectOut: true, redirectIn: false);
-
-                var stream = p.StandardOutput.BaseStream;
-                int need = w * h * 4, got = 0;
-                while (got < need)
-                {
-                    int n = stream.Read(into, got, need - got);
-                    if (n <= 0) break;      // EOF：多半是时间点越界了
-                    got += n;
-                }
-
-                // stderr 不读干净的话进程可能卡在那里不退出
-                p.StandardError.ReadToEnd();
-                p.WaitForExit(10000);
-                return got == need;
-            }
-            catch { return false; }
-            finally { try { p?.Dispose(); } catch { } }
+            string vf = $"scale={width}:{height},vflip";
+            string args = "-hide_banner -loglevel error " +
+                          (startSeconds > 0.0005 ? $"-ss {startSeconds.ToString(Inv)} " : "") +
+                          $"-i \"{src}\" -vf {vf} -f rawvideo -pix_fmt rgba -";
+            return Start(args, redirectOut: true, redirectIn: false);
         }
 
         /// <summary>

@@ -55,16 +55,32 @@ namespace Love.EditorTools
 
         // 预览有两条路。VideoPlayer 快、能实时播；ffmpeg 抽帧慢一点但一定能用。
         // 编辑器模式下 VideoPlayer 不一定伺候，所以准备超时会自动倒向 ffmpeg
-        public enum Decoder { VideoPlayer, Ffmpeg }
-        [SerializeField] Decoder _decoder = Decoder.VideoPlayer;
+        public enum Decoder { Ffmpeg, VideoPlayer }
+
+        /// <summary>
+        /// 默认 ffmpeg。除了快（实测常驻流 1080p 只要 7.5ms/帧），
+        /// 更重要的是它和导出用的是同一个解码器，预览的颜色和成片一定对得上——
+        /// WindowsMediaFoundation 遇到 color primaries 标记缺失的文件会自己兜底，
+        /// 日志里那句 "may result in color shift" 就是在说这个。
+        /// </summary>
+        [SerializeField] Decoder _decoder = Decoder.Ffmpeg;
 
         GameObject _host;
         VideoPlayer _player;
         RenderTexture _source;     // VideoPlayer 解出来的原始帧
-        Texture2D _cpuFrame;       // ffmpeg 抽出来的原始帧
+        Texture2D _cpuFrame;       // ffmpeg 解出来的原始帧
         byte[] _cpuBuf;
+        VideoFrameStream _stream;  // 常驻解码进程
         double _prepareDeadline;
-        bool _cpuSeekPending;
+
+        // 定位节流。时间轴一次拖拽会甩出几十个 MouseDrag，
+        // 每个都真去定位一次的话，请求会越堆越多，界面就僵住了。
+        // 所以只记「最后想去哪一帧」，每拍最多兑现一次
+        long _wantFrame = -1;
+        long _playerSeekedTo = -1;
+        double _lastFetch;
+
+        [SerializeField] int _previewDiv = 1;   // 预览降采样：1 / 2 / 4
 
         RenderTexture _preview;    // 调色之后
         bool _prepared;
@@ -127,7 +143,7 @@ namespace Love.EditorTools
 
         void ReleaseAll()
         {
-            if (_player != null) { _player.frameReady -= OnFrameReady; _player.prepareCompleted -= OnPrepared; _player.errorReceived -= OnPlayerError; }
+            if (_player != null) { _player.prepareCompleted -= OnPrepared; _player.errorReceived -= OnPlayerError; }
             if (_host != null) DestroyImmediate(_host);
             _host = null; _player = null;
 
@@ -135,6 +151,8 @@ namespace Love.EditorTools
             ReleaseRt(ref _preview);
             if (_cpuFrame != null) { DestroyImmediate(_cpuFrame); _cpuFrame = null; }
             _cpuBuf = null;
+            _stream?.Dispose();
+            _stream = null;
 
             _renderer?.Dispose();
             _renderer = null;
@@ -219,10 +237,12 @@ namespace Love.EditorTools
             _player.skipOnDrop = false;
             _player.isLooping = false;
             _player.waitForFirstFrame = true;
-            _player.sendFrameReadyEvents = true;   // 没有它就不知道哪一帧真的解出来了，会拿着上一帧去调色
+            // sendFrameReadyEvents 官方文档就写着「会带来显著的 CPU 开销」——
+            // 它要求解码线程每帧和主线程同步一次。改成在 update 里轮询 player.frame，
+            // 拿到的信息一样，代价小得多
+            _player.sendFrameReadyEvents = false;
 
             _player.prepareCompleted += OnPrepared;
-            _player.frameReady += OnFrameReady;
             _player.errorReceived += OnPlayerError;
 
             _player.Prepare();
@@ -231,14 +251,46 @@ namespace Love.EditorTools
             Repaint();
         }
 
+        /// <summary>预览用的画面尺寸。降采样只影响预览，导出永远是全分辨率。</summary>
+        void PreviewSize(out int w, out int h)
+        {
+            int d = Mathf.Clamp(_previewDiv, 1, 4);
+            // 保持偶数，缩放滤镜和拜耳无关但奇数尺寸容易在别处出岔子
+            w = Mathf.Max(2, (_srcW / d) & ~1);
+            h = Mathf.Max(2, (_srcH / d) & ~1);
+        }
+
         void SetupCpuPath()
         {
+            _stream?.Dispose();
             if (_cpuFrame != null) DestroyImmediate(_cpuFrame);
-            _cpuFrame = new Texture2D(Mathf.Max(1, _srcW), Mathf.Max(1, _srcH),
-                                      TextureFormat.RGBA32, false, false)
+
+            PreviewSize(out int w, out int h);
+            _cpuFrame = new Texture2D(w, h, TextureFormat.RGBA32, false, false)
             { name = "VideoStationCpuFrame", hideFlags = HideFlags.HideAndDontSave,
               wrapMode = TextureWrapMode.Clamp };
-            _cpuBuf = new byte[(long)Mathf.Max(1, _srcW) * Mathf.Max(1, _srcH) * 4];
+            _cpuBuf = new byte[(long)w * h * 4];
+            _stream = new VideoFrameStream(_path, _fps, w, h);
+        }
+
+        /// <summary>
+        /// 换预览分辨率。ffmpeg 那条路要重建解码流（缩放是在管道之前做的，
+        /// 省的是传输量而不只是 GPU），VideoPlayer 那条路只影响调色时的目标尺寸。
+        /// </summary>
+        void SetPreviewDiv(int div)
+        {
+            div = Mathf.Clamp(div, 1, 4);
+            if (div == _previewDiv) return;
+            _previewDiv = div;
+
+            if (_decoder == Decoder.Ffmpeg && _prepared)
+            {
+                SetupCpuPath();
+                _canvas.FitPending = true;
+                _wantFrame = _frame;
+            }
+            _dirty = true;
+            Repaint();
         }
 
         /// <summary>换解码器。参数和入出点都留着，只是换一条取帧的路。</summary>
@@ -304,12 +356,7 @@ namespace Love.EditorTools
             Repaint();
         }
 
-        void OnFrameReady(VideoPlayer vp, long frameIdx)
-        {
-            _frame = frameIdx;
-            _dirty = true;
-            Repaint();
-        }
+        
 
         // ---------------- 每帧 ----------------
 
@@ -333,49 +380,98 @@ namespace Love.EditorTools
                 return;
             }
 
-            // 播放：按真实时间累积，够一帧就步进一帧。
-            // 不用 VideoPlayer 自己的时钟——编辑器模式下 player loop 不一定在跑
-            if (_playing && _prepared)
+            if (!_prepared) return;
+
+            bool repaint = false;
+
+            // ---- 播放：只把「想去哪一帧」往前挪，真正取帧统一在下面做 ----
+            if (_playing)
             {
                 double now = EditorApplication.timeSinceStartup;
-                double dt = Mathf.Clamp((float)(now - _lastTick), 0f, 0.25f);
+                _playAccum += Mathf.Clamp((float)(now - _lastTick), 0f, 0.5f);
                 _lastTick = now;
-                _playAccum += dt;
 
                 double step = 1.0 / Math.Max(_fps, 1.0);
-                long last = Math.Min(_frameCount - 1, _outFrame);
-                int guard = 0;
-                // ffmpeg 那条路每帧都要起一次进程，追不上实时，一次只前进一帧免得越积越多
-                int maxSteps = _decoder == Decoder.Ffmpeg ? 1 : 4;
-                while (_playAccum >= step && guard++ < maxSteps)
+                if (_playAccum >= step)
                 {
-                    _playAccum -= step;
-                    if (_frame >= last) { _playing = false; break; }
-                    if (_decoder == Decoder.Ffmpeg) SeekTo(_frame + 1);
-                    else _player?.StepForward();
+                    // 一拍只前进一帧，跟不上就把欠的时间丢掉。
+                    // 原来那版会"补齐"落后的帧数，结果是越慢越要多解码，
+                    // 一旦跟不上就再也追不回来——正反馈直接把界面拖死
+                    _playAccum = 0.0;
+
+                    long last = Math.Min(_frameCount - 1, _outFrame);
+                    if (_frame >= last) _playing = false;
+                    else if (_decoder == Decoder.Ffmpeg) _wantFrame = _frame + 1;
+                    else { _player?.StepForward(); _playerSeekedTo = -1; }
                 }
-                if (_decoder == Decoder.Ffmpeg) _playAccum = 0.0;   // 别把追不上的时间累成债
-                Repaint();
+                repaint = true;
             }
 
-            // 排在播放步进之后：这一拍要是刚步进过，就在同一拍把帧取回来
-            if (_cpuSeekPending && _decoder == Decoder.Ffmpeg)
+            // ---- 取帧：一拍最多一次，且永远只兑现最后那个请求 ----
+            //
+            // 拖时间轴时每次都要重开解码进程，实测约 130ms，而这是在主线程上等。
+            // 不留间隔的话编辑器每一拍都被占满，输入和重绘都挤不进来。
+            // 播放是顺序读（约 6ms），不需要节流
+            bool throttled = !_playing && EditorApplication.timeSinceStartup - _lastFetch < 0.12;
+            if (_wantFrame >= 0 && !throttled)
             {
-                _cpuSeekPending = false;
-                GrabCpuFrame();
+                long want = _wantFrame;
+                _wantFrame = -1;
+                _lastFetch = EditorApplication.timeSinceStartup;
+                if (Fetch(want)) { _frame = want; _dirty = true; repaint = true; }
+            }
+            else if (_wantFrame >= 0) repaint = true;   // 还欠着一次，下一拍再来
+
+            // ---- VideoPlayer 是异步解码的，实际走到哪一帧只能轮询 ----
+            if (_decoder == Decoder.VideoPlayer && _player != null)
+            {
+                long f = _player.frame;
+                if (f >= 0 && f != _frame) { _frame = f; _dirty = true; repaint = true; }
             }
 
-            if (_dirty) { RenderPreview(); Repaint(); }
+            if (_dirty && RenderPreview()) repaint = true;
+
+            // 只在真有变化时重绘。原来那版无条件 Repaint，一旦 RenderPreview
+            // 提前返回（还没准备好、渲染器拿不到），_dirty 清不掉，
+            // 就变成每拍都重绘的空转，整个编辑器跟着发涩
+            if (repaint) Repaint();
         }
 
-        void RenderPreview()
+        /// <summary>把某一帧取到贴图里。返回 false 表示这次没取到（到片尾或解码出错）。</summary>
+        bool Fetch(long want)
+        {
+            if (_decoder == Decoder.Ffmpeg)
+            {
+                if (_stream == null || _cpuFrame == null || _cpuBuf == null) return false;
+                if (!_stream.TryGet(want, _cpuBuf)) return false;
+                _cpuFrame.LoadRawTextureData(_cpuBuf);
+                _cpuFrame.Apply(false, false);
+                return true;
+            }
+
+            if (_player == null) return false;
+            // 同一帧不要重复定位。VideoPlayer 的 seek 会冲掉解码器状态，很贵
+            if (want != _playerSeekedTo) { _player.frame = want; _playerSeekedTo = want; }
+            return true;
+        }
+
+        bool RenderPreview()
         {
             var src = FrameSource;
-            if (!_prepared || src == null) return;
+            if (!_prepared || src == null) return false;
             var r = Renderer;
-            if (r == null) return;
+            if (r == null) return false;
 
             _settings.OutputSize(src.width, src.height, out int ow, out int oh);
+
+            // ffmpeg 那条路在解码时就已经缩过了（缩在管道之前，省的是传输量），
+            // 这里只需要处理 VideoPlayer 那条路
+            if (_decoder == Decoder.VideoPlayer)
+            {
+                int div = Mathf.Clamp(_previewDiv, 1, 4);
+                ow = Mathf.Max(2, ow / div);
+                oh = Mathf.Max(2, oh / div);
+            }
             if (_preview == null || _preview.width != ow || _preview.height != oh)
             {
                 ReleaseRt(ref _preview);
@@ -396,6 +492,7 @@ namespace Love.EditorTools
                 lutAmount = _lutAmount,
             });
             _dirty = false;
+            return true;
         }
 
         // ---------------- 布局 ----------------
@@ -483,6 +580,16 @@ namespace Love.EditorTools
                     _canvas.FitPending = true;
                 if (GUILayout.Button("100%", EditorStyles.toolbarButton, GUILayout.Width(46f)))
                     _canvas.SetZoom(1f);
+
+                GUILayout.Space(8f);
+
+                // 预览分辨率。降下来最省的是解码和管道传输，不是 GPU
+                int[] divs = { 1, 2, 4 };
+                int cur = Array.IndexOf(divs, Mathf.Clamp(_previewDiv, 1, 4));
+                int pick = EditorGUILayout.Popup(cur < 0 ? 0 : cur,
+                    new[] { "预览 全分辨率", "预览 1/2", "预览 1/4" },
+                    EditorStyles.toolbarPopup, GUILayout.Width(100f));
+                if (pick != cur) SetPreviewDiv(divs[pick]);
             }
 
             GUILayout.FlexibleSpace();
@@ -653,41 +760,27 @@ namespace Love.EditorTools
             return $"{ts.Hours:00}:{ts.Minutes:00}:{ts.Seconds:00}:{ff:00}";
         }
 
+        /// <summary>
+        /// 只登记「想去哪一帧」，不做任何解码。
+        ///
+        /// 这个函数会被时间轴的 MouseDrag 调到，也就是在 OnGUI 里。一次拖拽能甩出
+        /// 几十个事件，每个都真去定位一次的话请求会越堆越多，界面就僵住了。
+        /// 真正取帧在 update 里做，而且一拍最多一次、只兑现最后那个请求。
+        /// </summary>
         void SeekTo(long frame)
         {
             if (!_prepared) return;
             if (_frameCount > 0) frame = Math.Max(0, Math.Min(frame, _frameCount - 1));
-            _frame = frame;
-
-            // ffmpeg 抽一帧要起一个进程，几十到几百毫秒。这个函数会被时间轴的
-            // MouseDrag 调到，也就是在 OnGUI 里——同步等在这儿界面会整个僵住，
-            // 所以只记个待办，真正抽帧放到 update 里
-            if (_decoder == Decoder.Ffmpeg) _cpuSeekPending = true;
-            else if (_player != null) _player.frame = frame;
-
-            _dirty = true;
+            _wantFrame = frame;
+            _frame = frame;      // 播放头先动起来，画面等取到了再更新
             Repaint();
-        }
-
-        void GrabCpuFrame()
-        {
-            if (_cpuFrame == null || _cpuBuf == null) return;
-
-            // 取帧中心的时刻而不是边界，免得浮点误差把定位甩到隔壁帧
-            double t = (_frame + 0.5) / Math.Max(_fps, 1.0);
-            if (!FfmpegTool.GrabFrame(_path, t, _srcW, _srcH, _cpuBuf)) return;
-
-            _cpuFrame.LoadRawTextureData(_cpuBuf);
-            _cpuFrame.Apply(false, false);
-            _dirty = true;
         }
 
         void StepBy(int delta)
         {
             if (!_prepared) return;
             _playing = false;
-            if (delta == 1 && _decoder == Decoder.VideoPlayer && _player != null) _player.StepForward();
-            else SeekTo(_frame + delta);
+            SeekTo(_frame + delta);
         }
 
         // ---------------- 参数栏 ----------------
@@ -789,6 +882,13 @@ namespace Love.EditorTools
 
             _settings.OutputSize(Mathf.Max(1, _srcW), Mathf.Max(1, _srcH), out int ow, out int oh);
             EditorGUILayout.LabelField("输出", $"{ow} × {oh}    {_outFrame - _inFrame + 1} 帧");
+
+            // 预览降分辨率时，Bloom 半径、颗粒粗细、锐化这些跟像素尺寸挂钩的效果
+            // 在预览里和成片是不一样的，得说清楚
+            if (_previewDiv > 1)
+                EditorGUILayout.HelpBox($"预览正在按 1/{_previewDiv} 渲染，导出仍是全分辨率。\n" +
+                                        "Bloom 半径、颗粒粗细、锐化这些和像素尺寸挂钩的效果，预览会和成片有出入。",
+                                        MessageType.Info);
 
             // H.264 的 yuv420p 要求宽高都是偶数，裁剪很容易裁出奇数来
             if ((ow & 1) != 0 || (oh & 1) != 0)
