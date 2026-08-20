@@ -40,25 +40,10 @@ Build/
 sysinfo.txt
 crashlytics-build.properties
 
-# ---------------- 超出 GitHub 限制的大文件 ----------------
-
-# AI 模型共约 800 MB，其中三个单文件超过 GitHub 的 100 MB 硬上限。
-# 都是可公开下载的第三方权重，用 Tools/fetch-models.sh 取回，不进版本库。
-LOVE/Assets/GameAssets/Models/*.onnx
-LOVE/Assets/GameAssets/Models/*.onnx.meta
-
-# 测试视频约 180 MB，属于素材而非代码。
-# 自己的片子放进去即可，文件名对上 story.json 里的 video 字段。
-LOVE/Assets/StreamingAssets/Videos/*.mp4
-LOVE/Assets/StreamingAssets/Videos/*.mp4.meta
-
-# BGM 同理，属于素材
-LOVE/Assets/Resources/Audio/BGM/*.ogg
-LOVE/Assets/Resources/Audio/BGM/*.mp3
-LOVE/Assets/Resources/Audio/BGM/*.wav
-LOVE/Assets/Resources/Audio/BGM/*.ogg.meta
-LOVE/Assets/Resources/Audio/BGM/*.mp3.meta
-LOVE/Assets/Resources/Audio/BGM/*.wav.meta
+# ---------------- 大文件走 Git LFS ----------------
+# 模型、视频、音频由 .gitattributes 交给 LFS 托管，不在这里排除。
+# 单文件超 100 MB 的限制对 LFS 不适用，但 GitHub 免费额度只有
+# 1 GB 存储 + 1 GB/月流量，这批文件已经接近上限。
 
 # ---------------- 系统垃圾 ----------------
 .DS_Store

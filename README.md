@@ -28,17 +28,19 @@ GalgameLOVE/
             └── Videos/            视频文件
 ```
 
-## 克隆之后要先做两件事
+## 克隆
 
-版本库里**不含 AI 模型和视频素材**——模型约 800 MB 且三个单文件超过 GitHub 的
-100 MB 硬上限，视频属于素材而非代码。
+模型、视频、音频走 **Git LFS**，克隆前先确保装了它：
 
 ```bash
-bash Tools/fetch-models.sh          # 取回 ONNX 模型（可选，只影响 AI 蒙版功能）
+git lfs install
+git clone https://github.com/GORXE111/Unity-VideoPICEdit.git
 ```
 
-视频自己放进 `LOVE/Assets/StreamingAssets/Videos/`，文件名对上 `story.json` 里的
-`video` 字段即可。**没有视频也能跑**——框架会自动切到占位模式把流程走完。
+没装 LFS 直接克隆的话，这些文件会是几百字节的指针文本而不是真实内容。
+补救：装好 LFS 后在仓库里执行 `git lfs pull`。
+
+`Tools/fetch-models.sh` 仍然保留——LFS 流量用完时可以用它从上游直接取模型。
 
 ## 第一次打开工程
 
