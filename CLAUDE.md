@@ -109,7 +109,7 @@ GradePresetStore     预设读写，编辑器和运行时共用
 VideoGrade.shader    6 个 Pass，算法在 4 个 .cginc 里
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
-SonyRawImporter      索尼 ARW 解码（编辑器侧，只支持未压缩）
+SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
 ```
 
 `VideoGradeRenderer.Render(任意Texture, 任意RenderTexture, settings, options)`。
@@ -186,6 +186,11 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   明显偏黄，但绿色是对的，第一眼不容易断定是白平衡问题。
 - **数组类型的新字段要防 null**。`hslHue` 这些是后加的，早先存的 `grade.json` 里没有，
   `JsonUtility` 读进来可能是 null 或长度不对。
+- **ARW2 解码里 `imax == imin` 会多读一个增量**，`bit` 走到 128、下标越过整块。
+  合法码流不会这样，但坏文件会，两个字节都得判界。dcraw 靠 `malloc(raw_width+1)`
+  的越界读糊过去，那读的是未初始化内存、输出不确定，不能照抄。
+- **RAW 解码相关的 LibRaw / DNGlab 都是 LGPL**，不要抄代码。格式本身不受版权保护，
+  照着规范自己写即可（和当初拒掉 GPL 的 RobustVideoMatting 是同一条线）。
 - **PlayerPrefs 会悄悄盖掉 Inspector 配置**。`AudioManager.rememberPlayerSettings` 和
   `VideoPostProcessor.loadOnStart` 关掉时才以 Inspector / 场景为准。
 - **渐变插值的起点要先快照**。直接拿被写入的对象当插值基准，每帧基准都在动，
