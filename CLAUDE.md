@@ -110,13 +110,21 @@ VideoGrade.shader    6 个 Pass，算法在 4 个 .cginc 里
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
 SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
+GradeCanvas          预览画布：棋盘底 / 缩放平移 / 硬裁剪，只摆图不渲染
+FfmpegTool           ffmpeg 定位与命令行拼装（解码、编码、单帧抓取、ffprobe）
 ```
 
 `VideoGradeRenderer.Render(任意Texture, 任意RenderTexture, settings, options)`。
 抽出来正是为了让编辑器的修图台复用同一条管线处理静态图片。
 
-四个消费方：`VideoPostProcessor`（场景组件）、`VideoGradeWindow`（调色台）、
-`PhotoGradeWindow`（修图台）、`VideoGradePanel`（运行时面板，正式包默认禁用）。
+五个消费方：`VideoPostProcessor`（场景组件）、`VideoGradeWindow`（调色台）、
+`VideoStationWindow`（视频台）、`PhotoGradeWindow`（修图台）、
+`VideoGradePanel`（运行时面板，正式包默认禁用）。
+
+**视频台的预览和导出走两条完全不同的路**，这是刻意的：预览用 `VideoPlayer`（快、能实时播），
+导出用 `ffmpeg 解码 → Unity 调色 → ffmpeg 编码`。编辑器模式下 VideoPlayer 的逐帧步进
+能不能稳定触发事件没有把握，而导出必须确定，所以让它一点都不依赖 VideoPlayer。
+VideoPlayer 准备超时（6 秒）会自动把预览也倒向 ffmpeg 抽帧。
 
 参数界面 100+ 控件，由 `Editor/GradeSettingsGUI.cs` 一份实现供两个窗口共用。
 
@@ -186,6 +194,12 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   明显偏黄，但绿色是对的，第一眼不容易断定是白平衡问题。
 - **数组类型的新字段要防 null**。`hslHue` 这些是后加的，早先存的 `grade.json` 里没有，
   `JsonUtility` 读进来可能是 null 或长度不对。
+- **ffmpeg 的裸帧第一行是画面顶部，Unity 贴图数据第一行是底部**。解码和编码两头
+  都要 `vflip` 才抵消。只翻一头的话画面在管线里是倒的——暗角这种中心对称的效果
+  看不出来，但裁剪、渐变窗口、镜头畸变会全部上下颠倒。
+- **子进程的 stderr 必须有人读**，否则管道写满时 ffmpeg 会卡死在那儿不退出。
+- **不要在 `OnGUI` 里同步等子进程**。视频台的 ffmpeg 抽帧要几十到几百毫秒，
+  时间轴的 `MouseDrag` 直接调它会让界面整个僵住，所以只记待办、放到 `update` 里做。
 - **ARW2 解码里 `imax == imin` 会多读一个增量**，`bit` 走到 128、下标越过整块。
   合法码流不会这样，但坏文件会，两个字节都得判界。dcraw 靠 `malloc(raw_width+1)`
   的越界读糊过去，那读的是未初始化内存、输出不确定，不能照抄。
