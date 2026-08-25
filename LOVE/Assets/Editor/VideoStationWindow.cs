@@ -27,18 +27,22 @@ namespace Love.EditorTools
     {
         const string MaterialPath = "Assets/GameAssets/Materials/VideoGrade.mat";
 
-        const float ToolbarH = 22f;
-        const float SplitterW = 5f;
-        const float TransportH = 62f;
+        const float ToolbarH = GradeSkin.ToolbarH;
+        const float SplitterW = GradeSkin.SplitterW;
+        const float TransportH = 64f;
+        const float DefaultPanelW = 360f;
 
         const string PrefRightW = "VideoStation.rightPanelW";
+        const string PrefPanelOn = "VideoStation.panelVisible";
+        const string PrefTransOn = "VideoStation.transportVisible";
 
         [MenuItem("Tools/影视游戏/视频台", false, 7)]
         public static void Open()
         {
             var w = GetWindow<VideoStationWindow>();
             w.titleContent = new GUIContent("视频台");
-            w.minSize = new Vector2(880f, 540f);
+            // 定得小一点，左右分屏也塞得下。工具栏会自己收纳，不怕窄
+            w.minSize = new Vector2(520f, 360f);
             w.Show();
         }
 
@@ -103,8 +107,12 @@ namespace Love.EditorTools
         readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
         Vector2 _paramScroll;
 
-        float _rightPanelW = 360f;
+        float _rightPanelW = DefaultPanelW;
         bool _draggingSplit;
+        bool _panelVisible = true;
+        bool _transportVisible = true;
+        double _lastSplitClick;
+        readonly GradeToolbar _tb = new GradeToolbar();
 
         Action _pendingAction;
 
@@ -124,7 +132,9 @@ namespace Love.EditorTools
         void OnEnable()
         {
             titleContent = new GUIContent("视频台");
-            _rightPanelW = EditorPrefs.GetFloat(PrefRightW, 360f);
+            _rightPanelW = EditorPrefs.GetFloat(PrefRightW, DefaultPanelW);
+            _panelVisible = EditorPrefs.GetBool(PrefPanelOn, true);
+            _transportVisible = EditorPrefs.GetBool(PrefTransOn, true);
             EditorApplication.update += OnEditorUpdate;
 
             // 程序集重载会把隐藏宿主干掉，路径还在就自己接回来
@@ -138,7 +148,14 @@ namespace Love.EditorTools
             ReleaseAll();
             // LUT 不放进 ReleaseAll：换视频时不该把套好的 LUT 也丢掉
             if (_lut != null) { DestroyImmediate(_lut); _lut = null; }
+            SaveLayout();
+        }
+
+        void SaveLayout()
+        {
             EditorPrefs.SetFloat(PrefRightW, _rightPanelW);
+            EditorPrefs.SetBool(PrefPanelOn, _panelVisible);
+            EditorPrefs.SetBool(PrefTransOn, _transportVisible);
         }
 
         void ReleaseAll()
@@ -505,137 +522,195 @@ namespace Love.EditorTools
                 return;
             }
 
-            _rightPanelW = Mathf.Clamp(_rightPanelW, 260f, Mathf.Max(300f, position.width - 320f));
+            float panelW = _panelVisible
+                ? Mathf.Clamp(_rightPanelW, 240f, Mathf.Max(240f, position.width - 220f))
+                : GradeSkin.CollapsedW;
+
+            float bodyY = ToolbarH;
+            float bodyH = position.height - ToolbarH - GradeSkin.StatusH;
 
             var toolbar = new Rect(0f, 0f, position.width, ToolbarH);
-            var right = new Rect(position.width - _rightPanelW, ToolbarH, _rightPanelW, position.height - ToolbarH);
-            var vSplit = new Rect(right.x - SplitterW, ToolbarH, SplitterW, position.height - ToolbarH);
-            var left = new Rect(0f, ToolbarH, vSplit.x, position.height - ToolbarH);
-            var transport = new Rect(left.x, left.yMax - TransportH, left.width, TransportH);
-            var canvas = new Rect(left.x, left.y, left.width, left.height - TransportH);
+            var right   = new Rect(position.width - panelW, bodyY, panelW, bodyH);
+            var vSplit  = new Rect(right.x - SplitterW, bodyY, SplitterW, bodyH);
+            var left    = new Rect(0f, bodyY, vSplit.x, bodyH);
+            var status  = new Rect(0f, position.height - GradeSkin.StatusH, position.width, GradeSkin.StatusH);
 
+            // 时间轴收起时连同它的分隔条一起让位给画布
+            float transH = _transportVisible ? Mathf.Min(TransportH, left.height * 0.6f) : 0f;
+            var transport = new Rect(left.x, left.yMax - transH, left.width, transH);
+            var hSplit    = new Rect(left.x, transport.y - SplitterW, left.width, SplitterW);
+            var canvas    = new Rect(left.x, left.y, left.width,
+                                     left.height - transH - (_transportVisible ? SplitterW : 0f));
+
+            // 分隔条的输入要先处理，否则会被下面的面板抢走
             HandleSplitter(vSplit);
 
             DrawToolbar(toolbar);
             DrawCanvasArea(canvas);
-            DrawTransport(transport);
-            GradeCanvas.DrawSplitter(vSplit, true);
-            DrawParamPanel(right);
+
+            if (_transportVisible)
+            {
+                GradeSkin.DrawSplitter(hSplit, false);
+                DrawTransport(transport);
+            }
+
+            GradeSkin.DrawSplitter(vSplit, true);
+
+            if (_panelVisible) DrawParamPanel(right);
+            else DrawCollapsedPanel(right);
+
+            DrawStatusBar(status);
         }
 
         void HandleSplitter(Rect vSplit)
         {
             var e = Event.current;
+
             if (e.type == EventType.MouseDown && e.button == 0 && vSplit.Contains(e.mousePosition))
-            { _draggingSplit = true; e.Use(); }
+            {
+                // 双击复位到默认宽度。拖歪了想回去，总不能靠手感对齐
+                double now = EditorApplication.timeSinceStartup;
+                if (now - _lastSplitClick < 0.35)
+                {
+                    _rightPanelW = DefaultPanelW;
+                    _panelVisible = true;
+                    SaveLayout();
+                }
+                _lastSplitClick = now;
+
+                _draggingSplit = _panelVisible;
+                e.Use();
+            }
             else if (e.type == EventType.MouseDrag && _draggingSplit)
             { _rightPanelW -= e.delta.x; e.Use(); Repaint(); }
             else if (e.type == EventType.MouseUp && _draggingSplit)
-            { _draggingSplit = false; EditorPrefs.SetFloat(PrefRightW, _rightPanelW); e.Use(); }
+            { _draggingSplit = false; SaveLayout(); e.Use(); }
+        }
+
+        /// <summary>参数栏收起后剩下的那条竖边，点一下再展开。</summary>
+        void DrawCollapsedPanel(Rect r)
+        {
+            EditorGUI.DrawRect(r, GradeSkin.Panel);
+            if (GUI.Button(r, new GUIContent("◀", "展开参数栏"), EditorStyles.label))
+            {
+                _panelVisible = true;
+                SaveLayout();
+            }
         }
 
         void DrawToolbar(Rect r)
         {
-            GUILayout.BeginArea(r, EditorStyles.toolbar);
-            EditorGUILayout.BeginHorizontal();
+            _tb.Begin(r);
+            bool on = _prepared;
 
-            if (GUILayout.Button("打开视频…", EditorStyles.toolbarButton, GUILayout.Width(78f)))
-                OpenVideoDialog();
+            _tb.Button("打开视频…", 78f, OpenVideoDialog, priority: 100);
+            _tb.Space(6f);
 
-            using (new EditorGUI.DisabledScope(!_prepared))
+            _tb.Button("|◀", 28f, () => SeekTo(_inFrame), priority: 88, disabled: !on, tooltip: "回到入点");
+            _tb.Button("◀", 24f, () => StepBy(-1), priority: 92, disabled: !on, tooltip: "上一帧");
+            _tb.Toggle(_playing, _playing ? "❚❚" : "▶", 32f, v =>
             {
-                GUILayout.Space(8f);
+                _playing = v;
+                _lastTick = EditorApplication.timeSinceStartup;
+                _playAccum = 0.0;
+            }, priority: 95, disabled: !on, tooltip: "播放 / 暂停");
+            _tb.Button("▶", 24f, () => StepBy(1), priority: 92, disabled: !on, tooltip: "下一帧");
+            _tb.Button("▶|", 28f, () => SeekTo(_outFrame), priority: 88, disabled: !on, tooltip: "跳到出点");
 
-                if (GUILayout.Button("|◀", EditorStyles.toolbarButton, GUILayout.Width(30f))) SeekTo(_inFrame);
-                if (GUILayout.Button("◀", EditorStyles.toolbarButton, GUILayout.Width(26f))) StepBy(-1);
+            _tb.Space(8f);
 
-                bool play = GUILayout.Toggle(_playing, _playing ? "❚❚" : "▶",
-                                             EditorStyles.toolbarButton, GUILayout.Width(34f));
-                if (play != _playing)
-                {
-                    _playing = play;
-                    _lastTick = EditorApplication.timeSinceStartup;
-                    _playAccum = 0.0;
-                }
+            _tb.Toggle(_bypass, "原图对比", 62f, v => { _bypass = v; _dirty = true; },
+                       priority: 80, disabled: !on, tooltip: "按住反斜杠也可以临时看原图");
+            _tb.Toggle(_splitCompare, "分屏", 42f, v => { _splitCompare = v; _dirty = true; },
+                       priority: 72, disabled: !on);
+            if (_splitCompare)
+                // 优先级压在「分屏」开关之上：撤退是按优先级从低到高来的，
+                // 这样绝不会出现"开关还在、调位置的滑条却没了"
+                _tb.Slider(_splitPosition, 0f, 1f, 80f,
+                           v => { _splitPosition = v; _dirty = true; }, priority: 73, disabled: !on);
 
-                if (GUILayout.Button("▶", EditorStyles.toolbarButton, GUILayout.Width(26f))) StepBy(1);
-                if (GUILayout.Button("▶|", EditorStyles.toolbarButton, GUILayout.Width(30f))) SeekTo(_outFrame);
+            _tb.Space(8f);
 
-                GUILayout.Space(10f);
+            _tb.Button("适应", 38f, () => _canvas.FitPending = true, priority: 64, disabled: !on);
+            _tb.Button("100%", 44f, () => _canvas.SetZoom(1f), priority: 60, disabled: !on);
 
-                bool bypass = GUILayout.Toggle(_bypass, "原图对比", EditorStyles.toolbarButton, GUILayout.Width(64f));
-                if (bypass != _bypass) { _bypass = bypass; _dirty = true; }
+            _tb.Space(6f);
 
-                bool split = GUILayout.Toggle(_splitCompare, "分屏", EditorStyles.toolbarButton, GUILayout.Width(44f));
-                if (split != _splitCompare) { _splitCompare = split; _dirty = true; }
+            // 预览分辨率。降下来最省的是解码和管道传输，不是 GPU
+            int[] divs = { 1, 2, 4 };
+            int cur = Mathf.Max(0, Array.IndexOf(divs, Mathf.Clamp(_previewDiv, 1, 4)));
+            _tb.Popup(cur, new[] { "预览 全分辨率", "预览 1/2", "预览 1/4" }, 96f,
+                      i2 => SetPreviewDiv(divs[i2]), priority: 56, disabled: !on, label: "预览分辨率");
 
-                if (_splitCompare)
-                {
-                    float pos = GUILayout.HorizontalSlider(_splitPosition, 0f, 1f, GUILayout.Width(90f));
-                    if (!Mathf.Approximately(pos, _splitPosition)) { _splitPosition = pos; _dirty = true; }
-                }
+            _tb.Popup((int)_decoder, new[] { "ffmpeg", "VideoPlayer" }, 84f,
+                      i2 => SwitchDecoder((Decoder)i2), priority: 52, label: "解码器",
+                      disabled: string.IsNullOrEmpty(_path) || !FfmpegTool.Available);
 
-                GUILayout.Space(10f);
-                if (GUILayout.Button("适应", EditorStyles.toolbarButton, GUILayout.Width(40f)))
-                    _canvas.FitPending = true;
-                if (GUILayout.Button("100%", EditorStyles.toolbarButton, GUILayout.Width(46f)))
-                    _canvas.SetZoom(1f);
+            _tb.Flex();
 
-                GUILayout.Space(8f);
+            _tb.Button("胶片化", 50f, () =>
+            {
+                Undo.RecordObject(this, "胶片化预设");
+                _settings.ApplyFilmLook();
+                _dirty = true;
+            }, priority: 30, disabled: !on);
 
-                // 预览分辨率。降下来最省的是解码和管道传输，不是 GPU
-                int[] divs = { 1, 2, 4 };
-                int cur = Array.IndexOf(divs, Mathf.Clamp(_previewDiv, 1, 4));
-                int pick = EditorGUILayout.Popup(cur < 0 ? 0 : cur,
-                    new[] { "预览 全分辨率", "预览 1/2", "预览 1/4" },
-                    EditorStyles.toolbarPopup, GUILayout.Width(100f));
-                if (pick != cur) SetPreviewDiv(divs[pick]);
+            _tb.Button("重置参数", 62f, () =>
+            {
+                Undo.RecordObject(this, "重置参数");
+                _settings.Reset();
+                _dirty = true;
+            }, priority: 30, disabled: !on);
+
+            _tb.Space(6f);
+
+            _tb.Toggle(_transportVisible, "时间轴", 50f, v => { _transportVisible = v; SaveLayout(); },
+                       priority: 44);
+            _tb.Toggle(_panelVisible, "参数栏", 50f, v => { _panelVisible = v; SaveLayout(); },
+                       priority: 98, tooltip: "收起参数栏，画布占满窗口");
+
+            _tb.End();
+        }
+
+        /// <summary>
+        /// 底部状态栏。文件名、尺寸、帧率这些原来挤在工具栏中间，
+        /// 一到窄窗口就把按钮顶掉——信息该待在信息该待的地方。
+        /// </summary>
+        void DrawStatusBar(Rect r)
+        {
+            EditorGUI.DrawRect(r, GradeSkin.Bar);
+            GradeSkin.Line(r.x, r.y, r.width, 1f, GradeSkin.Trough);
+
+            if (!_prepared)
+            {
+                string msg = !string.IsNullOrEmpty(_loadError) ? "载入失败：" + _loadError
+                           : !string.IsNullOrEmpty(_path) ? "正在准备…"
+                           : "未载入视频";
+                GUI.Label(r, msg, GradeSkin.StatusDim);
+                return;
             }
 
-            GUILayout.FlexibleSpace();
-
-            if (_prepared)
-                GUILayout.Label($"{Path.GetFileName(_path)}    {_srcW}×{_srcH}    {_fps:0.###} fps    " +
-                                $"{_frameCount} 帧    [{(_decoder == Decoder.Ffmpeg ? "ffmpeg 抽帧" : "VideoPlayer")}]",
-                                EditorStyles.miniLabel);
-            else if (!string.IsNullOrEmpty(_loadError))
-                GUILayout.Label("载入失败：" + _loadError, EditorStyles.miniLabel);
-            else if (!string.IsNullOrEmpty(_path))
-                GUILayout.Label("正在准备…", EditorStyles.miniLabel);
-
-            GUILayout.FlexibleSpace();
-
-            using (new EditorGUI.DisabledScope(!_prepared))
+            float x = r.x;
+            void Cell(string text, float w, GUIStyle st)
             {
-                if (GUILayout.Button("胶片化", EditorStyles.toolbarButton, GUILayout.Width(52f)))
-                {
-                    Undo.RecordObject(this, "胶片化预设");
-                    _settings.ApplyFilmLook();
-                    _dirty = true;
-                }
-                if (GUILayout.Button("重置参数", EditorStyles.toolbarButton, GUILayout.Width(64f)))
-                {
-                    Undo.RecordObject(this, "重置参数");
-                    _settings.Reset();
-                    _dirty = true;
-                }
+                GUI.Label(new Rect(x, r.y, w, r.height), text, st);
+                x += w;
+                GradeSkin.Line(x, r.y + 3f, 1f, r.height - 6f, GradeSkin.Trough);
             }
 
-            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(_path) || !FfmpegTool.Available))
-            {
-                var d = (Decoder)EditorGUILayout.EnumPopup(_decoder, EditorStyles.toolbarPopup, GUILayout.Width(96f));
-                if (d != _decoder) SwitchDecoder(d);
-            }
-
-            EditorGUILayout.EndHorizontal();
-            GUILayout.EndArea();
+            Cell(Path.GetFileName(_path), Mathf.Min(240f, r.width * 0.3f), GradeSkin.Status);
+            Cell($"{_srcW}×{_srcH}  {_fps:0.###}fps", 150f, GradeSkin.StatusDim);
+            Cell($"帧 {_frame} / {_frameCount - 1}   {Timecode(_frame)}", 190f, GradeSkin.Status);
+            Cell($"缩放 {_canvas.Zoom * 100f:0}%", 84f, GradeSkin.StatusDim);
+            Cell(_decoder == Decoder.Ffmpeg ? "ffmpeg" : "VideoPlayer", 84f, GradeSkin.StatusDim);
+            if (_previewDiv > 1) Cell($"预览 1/{_previewDiv}", 76f, GradeSkin.StatusDim);
         }
 
         void DrawCanvasArea(Rect r)
         {
             if (!_prepared)
             {
-                EditorGUI.DrawRect(r, new Color(0.13f, 0.14f, 0.16f));
+                EditorGUI.DrawRect(r, GradeSkin.Canvas);
                 string msg = !string.IsNullOrEmpty(_loadError)
                     ? "载入失败：" + _loadError
                     : "把视频拖进来，或用左上角「打开视频」";
@@ -647,12 +722,25 @@ namespace Love.EditorTools
 
             if (_canvas.HandleInput(r)) Repaint();
             if (_canvas.ConsumeCompareChanged()) _dirty = true;
+            HandleTransportKeys();
 
             // 裁剪会改变输出尺寸，画布按变换后的来摆
             _settings.OutputSize(_srcW, _srcH, out int ow, out int oh);
             _canvas.Draw(r, _preview, ow, oh);
 
             HandleDragAndDrop(r);
+        }
+
+        /// <summary>方向键逐帧。空格已经被画布的抓手占了，那是和 PS 一致的约定。</summary>
+        void HandleTransportKeys()
+        {
+            var e = Event.current;
+            if (e.type != EventType.KeyDown || EditorGUIUtility.editingTextField) return;
+
+            if (e.keyCode == KeyCode.LeftArrow) { StepBy(-1); e.Use(); }
+            else if (e.keyCode == KeyCode.RightArrow) { StepBy(1); e.Use(); }
+            else if (e.keyCode == KeyCode.Home) { SeekTo(_inFrame); e.Use(); }
+            else if (e.keyCode == KeyCode.End) { SeekTo(_outFrame); e.Use(); }
         }
 
         void HandleDragAndDrop(Rect r)
@@ -688,13 +776,13 @@ namespace Love.EditorTools
 
         void DrawTransport(Rect r)
         {
-            EditorGUI.DrawRect(r, new Color(0.19f, 0.19f, 0.21f));
+            EditorGUI.DrawRect(r, GradeSkin.Bar);
             if (!_prepared) return;
 
             var bar = new Rect(r.x + 12f, r.y + 10f, r.width - 24f, 18f);
             DrawScrubber(bar);
 
-            var row = new Rect(r.x + 12f, r.y + 34f, r.width - 24f, 18f);
+            var row = new Rect(r.x + 12f, r.y + 34f, r.width - 24f, 20f);
             GUILayout.BeginArea(row);
             EditorGUILayout.BeginHorizontal();
 
@@ -724,7 +812,7 @@ namespace Love.EditorTools
 
         void DrawScrubber(Rect bar)
         {
-            EditorGUI.DrawRect(bar, new Color(0.11f, 0.11f, 0.13f));
+            EditorGUI.DrawRect(bar, GradeSkin.Trough);
 
             float Frac(long f) => _frameCount > 1 ? Mathf.Clamp01(f / (float)(_frameCount - 1)) : 0f;
 
@@ -732,11 +820,11 @@ namespace Love.EditorTools
             var inX = bar.x + Frac(_inFrame) * bar.width;
             var outX = bar.x + Frac(_outFrame) * bar.width;
             EditorGUI.DrawRect(new Rect(inX, bar.y, Mathf.Max(1f, outX - inX), bar.height),
-                               new Color(0.30f, 0.45f, 0.62f, 0.55f));
+                               GradeSkin.AccentDim);
 
             // 播放头
             float px = bar.x + Frac(_frame) * bar.width;
-            EditorGUI.DrawRect(new Rect(px - 1f, bar.y - 2f, 2f, bar.height + 4f), new Color(1f, 0.85f, 0.3f));
+            EditorGUI.DrawRect(new Rect(px - 1f, bar.y - 2f, 2f, bar.height + 4f), GradeSkin.Playhead);
 
             var e = Event.current;
             var grab = new Rect(bar.x, bar.y - 4f, bar.width, bar.height + 8f);
@@ -787,7 +875,7 @@ namespace Love.EditorTools
 
         void DrawParamPanel(Rect r)
         {
-            EditorGUI.DrawRect(r, new Color(0.22f, 0.22f, 0.24f));
+            EditorGUI.DrawRect(r, GradeSkin.Panel);
             GUILayout.BeginArea(new Rect(r.x + 4f, r.y + 2f, r.width - 8f, r.height - 4f));
 
             float prevLabel = EditorGUIUtility.labelWidth;

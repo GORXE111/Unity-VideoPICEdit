@@ -21,12 +21,14 @@ namespace Love.EditorTools
         public static void Open()
         {
             var w = GetWindow<PhotoGradeWindow>("修图台");
-            w.minSize = new Vector2(900f, 560f);
+            // 定得小一点，左右分屏也塞得下。工具栏会自己收纳，不怕窄
+            w.minSize = new Vector2(520f, 360f);
             w.Show();
         }
 
         const string MaterialPath = "Assets/GameAssets/Materials/VideoGrade.mat";
-        const float ToolbarH = 22f;
+        const float ToolbarH = GradeSkin.ToolbarH;
+        const float DefaultPanelW = 360f;
         const float ThumbSize = 72f;
         const int ThumbPixels = 128;
         const float SplitterW = 5f;
@@ -35,10 +37,14 @@ namespace Love.EditorTools
         const string PrefRightW = "PhotoGrade.rightPanelW";
         const string PrefFilmH  = "PhotoGrade.filmH";
         const string PrefFilmOn = "PhotoGrade.filmVisible";
+        const string PrefPanelOn = "PhotoGrade.panelVisible";
 
-        float _rightPanelW = 360f;
+        float _rightPanelW = DefaultPanelW;
         float _filmH = 96f;
         bool _filmVisible = true;
+        bool _panelVisible = true;
+        double _lastSplitClick;
+        readonly GradeToolbar _tb = new GradeToolbar();
 
         enum Splitter { None, Right, Film }
         Splitter _dragging = Splitter.None;
@@ -70,11 +76,9 @@ namespace Love.EditorTools
         RenderTexture _preview;
         bool _dirty = true;
 
-        float _zoom = 1f;
-        Vector2 _pan;
-        bool _fitPending = true;
-        bool _spaceDown;      // 空格临时切换成抓手，和 PS 一致
-        bool _holdCompare;    // 按住反斜杠看原图
+        // 画布（棋盘底 / 缩放平移 / 硬裁剪 / PS 那套快捷键）和视频台共用一份实现。
+        // 之前两个窗口各有一份，细看手感就是不一样的
+        readonly GradeCanvas _canvas = new GradeCanvas();
 
         // 裁剪。开着的时候画布故意显示未裁剪的整幅——
         // 看不见要裁掉什么，就没法判断裁得对不对
@@ -126,6 +130,7 @@ namespace Love.EditorTools
             _rightPanelW = EditorPrefs.GetFloat(PrefRightW, 360f);
             _filmH = EditorPrefs.GetFloat(PrefFilmH, 96f);
             _filmVisible = EditorPrefs.GetBool(PrefFilmOn, true);
+            _panelVisible = EditorPrefs.GetBool(PrefPanelOn, true);
         }
 
         void SaveLayout()
@@ -133,6 +138,7 @@ namespace Love.EditorTools
             EditorPrefs.SetFloat(PrefRightW, _rightPanelW);
             EditorPrefs.SetFloat(PrefFilmH, _filmH);
             EditorPrefs.SetBool(PrefFilmOn, _filmVisible);
+            EditorPrefs.SetBool(PrefPanelOn, _panelVisible);
         }
 
         /// <summary>
@@ -211,29 +217,40 @@ namespace Love.EditorTools
                 return;
             }
 
-            // 拖拽范围要留够，否则能把某一边拖到看不见
-            _rightPanelW = Mathf.Clamp(_rightPanelW, 260f, Mathf.Max(300f, position.width - 320f));
-            _filmH = Mathf.Clamp(_filmH, 64f, Mathf.Max(80f, position.height * 0.5f));
+            float panelW = _panelVisible
+                ? Mathf.Clamp(_rightPanelW, 240f, Mathf.Max(240f, position.width - 220f))
+                : GradeSkin.CollapsedW;
 
+            float bodyY = ToolbarH;
+            float bodyH = position.height - ToolbarH - GradeSkin.StatusH;
+
+            _filmH = Mathf.Clamp(_filmH, 64f, Mathf.Max(80f, bodyH * 0.5f));
             float filmH = _filmVisible ? _filmH : 0f;
 
-            var toolbar  = new Rect(0f, 0f, position.width, ToolbarH);
-            var right    = new Rect(position.width - _rightPanelW, ToolbarH, _rightPanelW, position.height - ToolbarH);
-            var vSplit   = new Rect(right.x - SplitterW, ToolbarH, SplitterW, position.height - ToolbarH);
-            var left     = new Rect(0f, ToolbarH, vSplit.x, position.height - ToolbarH);
-            var film     = new Rect(left.x, left.yMax - filmH, left.width, filmH);
-            var hSplit   = new Rect(left.x, film.y - SplitterW, left.width, SplitterW);
-            var canvas   = new Rect(left.x, left.y, left.width,
-                                    left.height - filmH - (_filmVisible ? SplitterW : 0f));
+            var toolbar = new Rect(0f, 0f, position.width, ToolbarH);
+            var right   = new Rect(position.width - panelW, bodyY, panelW, bodyH);
+            var vSplit  = new Rect(right.x - SplitterW, bodyY, SplitterW, bodyH);
+            var left    = new Rect(0f, bodyY, vSplit.x, bodyH);
+            var film    = new Rect(left.x, left.yMax - filmH, left.width, filmH);
+            var hSplit  = new Rect(left.x, film.y - SplitterW, left.width, SplitterW);
+            var canvas  = new Rect(left.x, left.y, left.width,
+                                   left.height - filmH - (_filmVisible ? SplitterW : 0f));
+            var status  = new Rect(0f, position.height - GradeSkin.StatusH, position.width, GradeSkin.StatusH);
 
             // 分隔条的输入要先处理，否则会被下面的面板抢走
             HandleSplitters(vSplit, hSplit);
 
             DrawToolbar(toolbar);
             DrawCanvas(canvas);
-            if (_filmVisible) { DrawSplitter(hSplit, false); DrawFilmstrip(film); }
-            DrawSplitter(vSplit, true);
-            DrawParamPanel(right);
+
+            if (_filmVisible) { GradeSkin.DrawSplitter(hSplit, false); DrawFilmstrip(film); }
+
+            GradeSkin.DrawSplitter(vSplit, true);
+
+            if (_panelVisible) DrawParamPanel(right);
+            else DrawCollapsedPanel(right);
+
+            DrawStatusBar(status);
         }
 
         #region 可拖拽分隔条
@@ -244,8 +261,23 @@ namespace Love.EditorTools
 
             if (e.type == EventType.MouseDown && e.button == 0)
             {
-                if (vSplit.Contains(e.mousePosition)) { _dragging = Splitter.Right; e.Use(); }
-                else if (_filmVisible && hSplit.Contains(e.mousePosition)) { _dragging = Splitter.Film; e.Use(); }
+                if (vSplit.Contains(e.mousePosition))
+                {
+                    // 双击复位到默认宽度。拖歪了想回去，总不能靠手感对齐
+                    double now = EditorApplication.timeSinceStartup;
+                    if (now - _lastSplitClick < 0.35)
+                    {
+                        _rightPanelW = DefaultPanelW;
+                        _panelVisible = true;
+                        SaveLayout();
+                    }
+                    _lastSplitClick = now;
+
+                    _dragging = _panelVisible ? Splitter.Right : Splitter.None;
+                    e.Use();
+                }
+                else if (_filmVisible && hSplit.Contains(e.mousePosition))
+                { _dragging = Splitter.Film; e.Use(); }
             }
             else if (e.type == EventType.MouseDrag && _dragging != Splitter.None)
             {
@@ -262,118 +294,132 @@ namespace Love.EditorTools
             }
         }
 
-        void DrawSplitter(Rect r, bool vertical)
+        /// <summary>参数栏收起后剩下的那条竖边，点一下再展开。</summary>
+        void DrawCollapsedPanel(Rect r)
         {
-            EditorGUIUtility.AddCursorRect(r, vertical ? MouseCursor.ResizeHorizontal : MouseCursor.ResizeVertical);
-            if (Event.current.type != EventType.Repaint) return;
-
-            EditorGUI.DrawRect(r, new Color(0.13f, 0.14f, 0.16f));
-            // 中间一道浅色，让人看出这里能拖
-            var grip = vertical
-                ? new Rect(r.center.x - 0.5f, r.center.y - 14f, 1f, 28f)
-                : new Rect(r.center.x - 14f, r.center.y - 0.5f, 28f, 1f);
-            EditorGUI.DrawRect(grip, new Color(1f, 1f, 1f, 0.22f));
+            EditorGUI.DrawRect(r, GradeSkin.Panel);
+            if (GUI.Button(r, new GUIContent("◀", "展开参数栏"), EditorStyles.label))
+            {
+                _panelVisible = true;
+                SaveLayout();
+            }
         }
 
         #endregion
 
         void DrawToolbar(Rect r)
         {
-            GUILayout.BeginArea(r, EditorStyles.toolbar);
-            EditorGUILayout.BeginHorizontal();
+            _tb.Begin(r);
+            bool has = _full != null;
 
-            if (GUILayout.Button("打开图片…", EditorStyles.toolbarButton, GUILayout.Width(78f))) OpenFiles();
-            if (GUILayout.Button("打开文件夹…", EditorStyles.toolbarButton, GUILayout.Width(88f))) OpenFolder();
-            if (GUILayout.Button("清空列表", EditorStyles.toolbarButton, GUILayout.Width(64f))) ClearEntries();
+            _tb.Button("打开图片…", 74f, OpenFiles, priority: 100);
+            _tb.Button("文件夹…", 64f, OpenFolder, priority: 86);
+            _tb.Button("清空", 44f, ClearEntries, priority: 40, disabled: _entries.Count == 0);
 
-            GUILayout.Space(12f);
+            _tb.Space(8f);
 
-            bool bypass = GUILayout.Toggle(_bypass, "原图对比", EditorStyles.toolbarButton, GUILayout.Width(64f));
-            if (bypass != _bypass) { _bypass = bypass; _dirty = true; }
-
-            bool split = GUILayout.Toggle(_splitCompare, "分屏", EditorStyles.toolbarButton, GUILayout.Width(44f));
-            if (split != _splitCompare) { _splitCompare = split; _dirty = true; }
-
+            _tb.Toggle(_bypass, "原图对比", 62f, v => { _bypass = v; _dirty = true; },
+                       priority: 80, disabled: !has, tooltip: "按住反斜杠也可以临时看原图");
+            _tb.Toggle(_splitCompare, "分屏", 42f, v => { _splitCompare = v; _dirty = true; },
+                       priority: 72, disabled: !has);
             if (_splitCompare)
+                // 优先级压在「分屏」开关之上：撤退是按优先级从低到高来的，
+                // 这样绝不会出现"开关还在、调位置的滑条却没了"
+                _tb.Slider(_splitPosition, 0f, 1f, 80f,
+                           v => { _splitPosition = v; _dirty = true; }, priority: 73, disabled: !has);
+
+            _tb.Space(8f);
+
+            _tb.Button("适应", 38f, () => _canvas.FitPending = true, priority: 64, disabled: !has);
+            _tb.Button("100%", 44f, () => _canvas.SetZoom(1f), priority: 60, disabled: !has);
+
+            _tb.Space(8f);
+
+            _tb.Toggle(_cropMode, "裁剪", 42f, v =>
             {
-                float pos = GUILayout.HorizontalSlider(_splitPosition, 0f, 1f, GUILayout.Width(90f));
-                if (!Mathf.Approximately(pos, _splitPosition)) { _splitPosition = pos; _dirty = true; }
-            }
-
-            GUILayout.Space(12f);
-
-            if (GUILayout.Button("适应", EditorStyles.toolbarButton, GUILayout.Width(40f))) _fitPending = true;
-
-            // 缩放下拉：当前值排在最前，选完立刻生效
-            int pick = EditorGUILayout.Popup(0,
-                new[] { $"{_zoom * 100f:0}%", "适应", "25%", "50%", "100%", "200%", "400%" },
-                EditorStyles.toolbarPopup, GUILayout.Width(66f));
-            if (pick == 1) _fitPending = true;
-            else if (pick > 1)
-            {
-                float[] presets = { 0f, 0f, 0.25f, 0.5f, 1f, 2f, 4f };
-                SetZoom(presets[pick], default);
-            }
-
-            bool film = GUILayout.Toggle(_filmVisible, "胶片条", EditorStyles.toolbarButton, GUILayout.Width(52f));
-            if (film != _filmVisible) { _filmVisible = film; SaveLayout(); }
-
-            GUILayout.Space(12f);
-
-            using (new EditorGUI.DisabledScope(_full == null))
-            {
-                bool crop = GUILayout.Toggle(_cropMode, "裁剪", EditorStyles.toolbarButton, GUILayout.Width(44f));
-                if (crop != _cropMode)
+                _cropMode = v;
+                // 进裁剪模式时如果还没框过，先给一个整幅的框，不然没有东西可拖
+                if (v && !_settings.cropEnabled)
                 {
-                    _cropMode = crop;
-                    // 进裁剪模式时如果还没框过，先给一个整幅的框，不然没有东西可拖
-                    if (crop && !_settings.cropEnabled)
-                    {
-                        Undo.RecordObject(this, "开始裁剪");
-                        _settings.cropEnabled = true;
-                        _settings.ResetCrop();
-                    }
-                    _fitPending = true;
-                    _dirty = true;
+                    Undo.RecordObject(this, "开始裁剪");
+                    _settings.cropEnabled = true;
+                    _settings.ResetCrop();
                 }
+                _canvas.FitPending = true;
+                _dirty = true;
+            }, priority: 78, disabled: !has);
 
-                // 吸管是一次性的：取完一次就自己关掉，免得下一次平移画面被当成取色
-                bool wb = GUILayout.Toggle(_pickWb, "白平衡吸管", EditorStyles.toolbarButton, GUILayout.Width(80f));
-                if (wb != _pickWb) { _pickWb = wb; Repaint(); }
+            // 吸管是一次性的：取完一次就自己关掉，免得下一次平移画面被当成取色
+            _tb.Toggle(_pickWb, "白平衡吸管", 76f, v => { _pickWb = v; Repaint(); },
+                       priority: 76, disabled: !has);
+            _tb.Button("自动色调", 62f, () => _pendingAction = AutoToneCurrent,
+                       priority: 74, disabled: !has);
 
-                if (GUILayout.Button("自动色调", EditorStyles.toolbarButton, GUILayout.Width(64f)))
-                    _pendingAction = AutoToneCurrent;
-            }
+            _tb.Flex();
 
-            GUILayout.FlexibleSpace();
-
-            // 图片信息放这里而不是盖在画面上——画布要保持干净，只有被处理过的图
-            if (_full != null)
-                GUILayout.Label($"{_full.name}    {_full.width}×{_full.height}", EditorStyles.miniLabel);
-
-            GUILayout.FlexibleSpace();
-
-            if (GUILayout.Button("胶片化", EditorStyles.toolbarButton, GUILayout.Width(52f)))
+            _tb.Button("胶片化", 50f, () =>
             {
                 Undo.RecordObject(this, "胶片化预设");
                 _settings.ApplyFilmLook();
                 _dirty = true;
-            }
-            if (GUILayout.Button("预设", EditorStyles.toolbarButton, GUILayout.Width(44f))) PresetMenu();
-            if (GUILayout.Button("重置参数", EditorStyles.toolbarButton, GUILayout.Width(64f)))
+            }, priority: 30);
+
+            _tb.Button("预设", 42f, PresetMenu, priority: 34);
+
+            _tb.Button("重置参数", 62f, () =>
             {
                 Undo.RecordObject(this, "重置参数");
                 _settings.Reset();
                 _dirty = true;
+            }, priority: 30);
+
+            _tb.Space(6f);
+
+            _tb.Toggle(_filmVisible, "胶片条", 50f, v => { _filmVisible = v; SaveLayout(); }, priority: 44);
+            _tb.Toggle(_panelVisible, "参数栏", 50f, v => { _panelVisible = v; SaveLayout(); },
+                       priority: 98, tooltip: "收起参数栏，画布占满窗口");
+
+            _tb.End();
+        }
+
+        /// <summary>
+        /// 底部状态栏。图片信息原来挤在工具栏中间，一到窄窗口就把按钮顶掉——
+        /// 信息该待在信息该待的地方。
+        /// </summary>
+        void DrawStatusBar(Rect r)
+        {
+            EditorGUI.DrawRect(r, GradeSkin.Bar);
+            GradeSkin.Line(r.x, r.y, r.width, 1f, GradeSkin.Trough);
+
+            if (_full == null)
+            {
+                GUI.Label(r, _entries.Count > 0 ? "未选中图片" : "未载入图片", GradeSkin.StatusDim);
+                return;
             }
 
-            EditorGUILayout.EndHorizontal();
-            GUILayout.EndArea();
+            float x = r.x;
+            void Cell(string text, float w, GUIStyle st)
+            {
+                GUI.Label(new Rect(x, r.y, w, r.height), text, st);
+                x += w;
+                GradeSkin.Line(x, r.y + 3f, 1f, r.height - 6f, GradeSkin.Trough);
+            }
+
+            Cell(_full.name, Mathf.Min(240f, r.width * 0.3f), GradeSkin.Status);
+            Cell($"{_full.width}×{_full.height}", 110f, GradeSkin.StatusDim);
+
+            _settings.OutputSize(_full.width, _full.height, out int ow, out int oh);
+            if (ow != _full.width || oh != _full.height)
+                Cell($"输出 {ow}×{oh}", 120f, GradeSkin.Status);
+
+            Cell($"缩放 {_canvas.Zoom * 100f:0}%", 84f, GradeSkin.StatusDim);
+            Cell($"第 {_selected + 1} / {_entries.Count} 张", 100f, GradeSkin.StatusDim);
+            if (_lut != null) Cell($"LUT {_lutName}", 140f, GradeSkin.StatusDim);
         }
 
         void DrawParamPanel(Rect r)
         {
-            EditorGUI.DrawRect(r, new Color(0.22f, 0.22f, 0.24f));
+            EditorGUI.DrawRect(r, GradeSkin.Panel);
             GUILayout.BeginArea(new Rect(r.x + 4f, r.y + 2f, r.width - 8f, r.height - 4f));
 
             // 标签宽度跟着面板走。用 Unity 的固定默认值时，
@@ -417,89 +463,31 @@ namespace Love.EditorTools
 
         #region 预览：缩放与平移
 
-        /// <summary>棋盘底纹，和 PS 一样用来表示透明区域。</summary>
-        static Texture2D _checker;
-        static Texture2D Checker
-        {
-            get
-            {
-                if (_checker != null) return _checker;
-                const int N = 16;
-                _checker = new Texture2D(N * 2, N * 2, TextureFormat.RGBA32, false, false)
-                { name = "Checker", filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Repeat,
-                  hideFlags = HideFlags.HideAndDontSave };
-                var a = new Color32(64, 64, 66, 255);
-                var b = new Color32(80, 80, 83, 255);
-                var px = new Color32[N * 2 * N * 2];
-                for (int y = 0; y < N * 2; y++)
-                    for (int x = 0; x < N * 2; x++)
-                        px[y * N * 2 + x] = ((x / N) + (y / N)) % 2 == 0 ? a : b;
-                _checker.SetPixels32(px);
-                _checker.Apply(false, false);
-                return _checker;
-            }
-        }
-
         void DrawCanvas(Rect r)
         {
-            EditorGUI.DrawRect(r, new Color(0.13f, 0.14f, 0.16f));
-
             if (_full == null)
             {
-                var hint = new Rect(r.x, r.center.y - 20f, r.width, 40f);
-                EditorGUI.LabelField(hint,
-                    "把图片拖进来，或用左上角「打开图片 / 打开文件夹」",
-                    new GUIStyle(EditorStyles.centeredGreyMiniLabel) { fontSize = 13 });
+                EditorGUI.DrawRect(r, GradeSkin.Canvas);
+                EditorGUI.LabelField(new Rect(r.x, r.center.y - 20f, r.width, 40f),
+                    "把图片拖进来，或用左上角「打开图片 / 打开文件夹」", GradeSkin.Placeholder);
                 HandleDragAndDrop(r);
                 return;
             }
 
-            HandlePreviewInput(r);
+            // 裁剪框 / 色卡角点正在拖时，别让画布平移抢走事件
+            bool block = (_chartMode && _chartDragIndex >= 0) || (_cropMode && _cropDrag >= 0);
+            if (_canvas.HandleInput(r, block)) Repaint();
+            // 按住反斜杠看原图。不直接写 _bypass，那会把用户自己按下的对比按钮状态冲掉
+            if (_canvas.ConsumeCompareChanged()) _dirty = true;
 
-            if (_fitPending) { FitToView(r); _fitPending = false; }
-
-            // 裁剪 / 旋转会改变画面尺寸，缩放和居中都要按变换之后的来算，
-            // 否则一旦转过 90 度，图就会被拉成错误的长宽比
             CanvasSize(out int cw, out int chh);
-            float w = cw * _zoom;
-            float h = chh * _zoom;
-            var img = new Rect(r.center.x - w * 0.5f + _pan.x, r.center.y - h * 0.5f + _pan.y, w, h);
-
-            if (Event.current.type == EventType.Repaint && _preview != null)
-            {
-                // 硬裁到画布区内，放大之后才不会画到胶片条和参数栏上。
-                // 这里只画已经渲好的贴图，不做任何渲染。
-                GUI.BeginGroup(r);
-                var local = new Rect(img.x - r.x, img.y - r.y, img.width, img.height);
-
-                // 棋盘底：图片有透明区域时才看得见，和 PS 一致
-                GUI.DrawTextureWithTexCoords(local, Checker,
-                    new Rect(0f, 0f, local.width / 32f, local.height / 32f));
-
-                GUI.DrawTexture(local, _preview, ScaleMode.StretchToFill, true);
-
-                // 一圈细描边，把画布和图像分开，缩小时更清楚边界在哪
-                var edge = new Color(0f, 0f, 0f, 0.55f);
-                EditorGUI.DrawRect(new Rect(local.x - 1f, local.y - 1f, local.width + 2f, 1f), edge);
-                EditorGUI.DrawRect(new Rect(local.x - 1f, local.yMax, local.width + 2f, 1f), edge);
-                EditorGUI.DrawRect(new Rect(local.x - 1f, local.y, 1f, local.height), edge);
-                EditorGUI.DrawRect(new Rect(local.xMax, local.y, 1f, local.height), edge);
-
-                GUI.EndGroup();
-            }
+            _canvas.Draw(r, _preview, cw, chh);
+            var img = _canvas.ImageRect;
 
             if (_cropMode) DrawCropOverlay(r, img);
             if (_chartMode) DrawChartOverlay(r, img);
             HandlePickInput(img);
             HandleDragAndDrop(r);
-        }
-
-        void FitToView(Rect r)
-        {
-            if (_full == null) return;
-            CanvasSize(out int w, out int h);
-            _zoom = Mathf.Min(r.width / w, r.height / h) * 0.95f;
-            _pan = Vector2.zero;
         }
 
         /// <summary>
@@ -523,69 +511,6 @@ namespace Love.EditorTools
             var srcUv = _settings.DisplayUvToSource(uv, _full.width, _full.height);
             _settings.cropEnabled = prev;
             return srcUv;
-        }
-
-        void HandlePreviewInput(Rect r)
-        {
-            var e = Event.current;
-            if (e.type == EventType.Layout) return;
-
-            if (e.type == EventType.KeyDown)
-            {
-                // 快捷键对齐 PS / Lightroom 的习惯
-                if (e.keyCode == KeyCode.Space) { _spaceDown = true; Repaint(); }
-                else if (e.keyCode == KeyCode.Backslash && !_holdCompare)
-                {
-                    // 按住看原图，松开回到成片
-                    _holdCompare = true; _bypass = true; _dirty = true; e.Use(); Repaint();
-                }
-                else if (e.keyCode == KeyCode.F ||
-                         (e.control && e.keyCode == KeyCode.Alpha0)) { _fitPending = true; e.Use(); Repaint(); }
-                else if (e.keyCode == KeyCode.Alpha1 ||
-                         (e.control && e.keyCode == KeyCode.Alpha1)) { SetZoom(1f, r); e.Use(); Repaint(); }
-                return;
-            }
-
-            if (e.type == EventType.KeyUp)
-            {
-                if (e.keyCode == KeyCode.Space) { _spaceDown = false; Repaint(); }
-                else if (e.keyCode == KeyCode.Backslash && _holdCompare)
-                {
-                    _holdCompare = false; _bypass = false; _dirty = true; e.Use(); Repaint();
-                }
-                return;
-            }
-
-            if (_spaceDown) EditorGUIUtility.AddCursorRect(r, MouseCursor.Pan);
-            if (!r.Contains(e.mousePosition)) return;
-            // 标定 / 裁剪正在拖控制点时，别让画布平移抢走事件
-            if (_chartMode && _chartDragIndex >= 0) return;
-            if (_cropMode && _cropDrag >= 0) return;
-
-            if (e.type == EventType.ScrollWheel)
-            {
-                float old = _zoom;
-                _zoom = Mathf.Clamp(_zoom * (1f - e.delta.y * 0.05f), 0.02f, 16f);
-                // 以鼠标位置为锚点缩放，否则放大时目标会跑出视野
-                Vector2 toMouse = e.mousePosition - (r.center + _pan);
-                _pan -= toMouse * (_zoom / old - 1f);
-                e.Use();
-                Repaint();
-            }
-            else if (e.type == EventType.MouseDrag && (e.button == 0 || e.button == 2))
-            {
-                _pan += e.delta;
-                e.Use();
-                Repaint();
-            }
-        }
-
-        /// <summary>以画布中心为锚点设定缩放比例。</summary>
-        void SetZoom(float zoom, Rect canvas)
-        {
-            float old = _zoom;
-            _zoom = Mathf.Clamp(zoom, 0.02f, 16f);
-            _pan *= _zoom / old;   // 保持当前看的位置不跳
         }
 
         void HandleDragAndDrop(Rect r)
@@ -634,7 +559,7 @@ namespace Love.EditorTools
 
             r.Render(_full, _preview, _settings, new VideoGradeRenderer.Options
             {
-                bypass = _bypass,
+                bypass = _bypass || _canvas.HoldCompare,
                 splitCompare = _splitCompare,
                 splitPosition = _splitPosition,
                 externalMask = CurrentMask,
@@ -660,7 +585,7 @@ namespace Love.EditorTools
 
         void DrawFilmstrip(Rect r)
         {
-            EditorGUI.DrawRect(r, new Color(0.10f, 0.11f, 0.13f));
+            EditorGUI.DrawRect(r, GradeSkin.Trough);
 
             if (_entries.Count == 0)
             {
@@ -685,7 +610,7 @@ namespace Love.EditorTools
 
                 if (i == _selected)
                     EditorGUI.DrawRect(new Rect(cell.x - 3f, cell.y - 3f, cell.width + 6f, cell.height + 6f),
-                                       new Color(0.35f, 0.62f, 0.95f));
+                                       GradeSkin.Accent);
 
                 EditorGUI.DrawRect(cell, new Color(0.06f, 0.07f, 0.08f));
                 var e = _entries[i];
@@ -717,7 +642,7 @@ namespace Love.EditorTools
             if (_full != null) { DestroyImmediate(_full); _full = null; }
             _full = LoadTextureFromFile(_entries[index].path);
 
-            _fitPending = true;
+            _canvas.FitPending = true;
             _dirty = true;
 #if LOVE_SENTIS
             ReleaseMask();   // 换图了，旧蒙版不再对应
@@ -1086,7 +1011,7 @@ namespace Love.EditorTools
             {
                 Vector2 p = ChartUvToScreen(img, _chartCorners[i]) - new Vector2(canvas.x, canvas.y);
                 var box = new Rect(p.x - 5f, p.y - 5f, 10f, 10f);
-                EditorGUI.DrawRect(box, i == 0 ? new Color(1f, 0.85f, 0.2f) : Color.white);
+                EditorGUI.DrawRect(box, i == 0 ? GradeSkin.Playhead : Color.white);
                 EditorGUI.DrawRect(new Rect(box.x + 2f, box.y + 2f, 6f, 6f), new Color(0f, 0f, 0f, 0.6f));
             }
 
@@ -1305,21 +1230,21 @@ namespace Love.EditorTools
 
                 // 框外压暗，一眼看出要裁掉哪些。四块拼起来而不是画一个带洞的矩形——
                 // IMGUI 没有洞这种东西
-                var dim = new Color(0f, 0f, 0f, 0.55f);
+                var dim = GradeSkin.Dim;
                 EditorGUI.DrawRect(new Rect(m.x, m.y, m.width, b.y - m.y), dim);
                 EditorGUI.DrawRect(new Rect(m.x, b.yMax, m.width, m.yMax - b.yMax), dim);
                 EditorGUI.DrawRect(new Rect(m.x, b.y, b.x - m.x, b.height), dim);
                 EditorGUI.DrawRect(new Rect(b.xMax, b.y, m.xMax - b.xMax, b.height), dim);
 
                 // 三分线：构图参考，Lightroom 的裁剪框也是这个
-                var thin = new Color(1f, 1f, 1f, 0.28f);
+                var thin = GradeSkin.Guide;
                 for (int i = 1; i <= 2; i++)
                 {
                     EditorGUI.DrawRect(new Rect(b.x + b.width * i / 3f, b.y, 1f, b.height), thin);
                     EditorGUI.DrawRect(new Rect(b.x, b.y + b.height * i / 3f, b.width, 1f), thin);
                 }
 
-                var line = new Color(1f, 1f, 1f, 0.9f);
+                var line = GradeSkin.Outline;
                 EditorGUI.DrawRect(new Rect(b.x, b.y, b.width, 1f), line);
                 EditorGUI.DrawRect(new Rect(b.x, b.yMax - 1f, b.width, 1f), line);
                 EditorGUI.DrawRect(new Rect(b.x, b.y, 1f, b.height), line);

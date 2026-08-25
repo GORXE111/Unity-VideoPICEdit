@@ -18,20 +18,29 @@ namespace Love.EditorTools
 
         // 折叠状态存 EditorPrefs：程序集一重载普通字段就重置，
         // 每次改完代码所有分组都弹回默认状态很烦
-        bool _foldPrimary   { get => GetFold("primary", true);    set => SetFold("primary", value); }
-        bool _foldLevels    { get => GetFold("levels", false);    set => SetFold("levels", value); }
-        bool _foldWheels    { get => GetFold("wheels", false);    set => SetFold("wheels", value); }
-        bool _foldGrade     { get => GetFold("grade", true);      set => SetFold("grade", value); }
-        bool _foldCurve     { get => GetFold("curve", false);     set => SetFold("curve", value); }
-        bool _foldSecondary { get => GetFold("secondary", false); set => SetFold("secondary", value); }
-        bool _foldEffect    { get => GetFold("effect", true);     set => SetFold("effect", value); }
-        bool _foldMask      { get => GetFold("aimask", false);    set => SetFold("aimask", value); }
-        bool _foldLog       { get => GetFold("log", false);       set => SetFold("log", value); }
-        bool _foldQuality   { get => GetFold("quality", false);   set => SetFold("quality", value); }
-        bool _foldSix       { get => GetFold("sixcurve", false);  set => SetFold("sixcurve", value); }
-        bool _foldLibrary   { get => GetFold("library", false);   set => SetFold("library", value); }
-        bool _foldHsl       { get => GetFold("hsl", false);       set => SetFold("hsl", value); }
-        bool _foldCrop      { get => GetFold("crop", false);      set => SetFold("crop", value); }
+        // 折叠状态按 key 存 EditorPrefs：程序集一重载普通字段就重置，
+        // 每次改完代码所有分组都弹回默认状态很烦。
+        // key -> 默认是否展开
+        static readonly (string key, string title, bool open, string words)[] Groups =
+        {
+            ("library",   "预设库",                             false, "预设 库 保存 读取 preset"),
+            ("crop",      "裁剪与旋转",                          false, "裁剪 旋转 拉直 翻转 比例 构图 crop 边界 宽度 高度"),
+            ("log",       "素材解码与校色基准",                   false, "log 解码 色卡 校色 矩阵 slog vlog clog logc dlog"),
+            ("quality",   "画质提升",                            false, "画质 降噪 通透度 纹理 去朦胧 锐化 对焦 clarity texture dehaze"),
+            ("primary",   "曝光与白平衡",                        true,  "曝光 白平衡 色温 色调 色调映射 tonemap aces"),
+            ("levels",    "色阶",                                false, "色阶 输入 输出 黑点 白点 中间调 levels"),
+            ("wheels",    "色轮  Lift / Gamma / Gain / Offset",  false, "色轮 lift gamma gain offset 一级 校色"),
+            ("grade",     "反差、色彩与色调分离",                 true,  "对比度 高光 阴影 饱和度 肤色 色相 色调分离 染色 分界"),
+            ("curve",     "曲线",                                false, "曲线 主曲线 rgb curve"),
+            ("hsl",       "HSL 八色带混合器",                     false, "hsl 八色带 混合器 红 橙 黄 绿 青 蓝 紫 品红 明亮度 饱和度"),
+            ("sixcurve",  "六条曲线",                            false, "六条曲线 色相 饱和 亮度 vs"),
+            ("secondary", "二级校色（Power Window / HSL 限定器）", false, "二级 power window 限定器 遮罩 窗口 渐变 椭圆 矩形"),
+            ("aimask",    "AI 蒙版用法",                         false, "ai 蒙版 主体 背景虚化 景深 反选 边缘 收缩 扩张"),
+            ("effect",    "效果",                                true,  "效果 辉光 bloom 模糊 畸变 暗角 颗粒 色差 抖动 斑马纹 镜头"),
+        };
+
+        string _filter = "";
+        bool Filtering => !string.IsNullOrEmpty(_filter);
 
         string _newPresetName = "";
         List<string> _presetCache;
@@ -76,14 +85,13 @@ namespace Love.EditorTools
         {
             _undoTarget = undoTarget;
 
-            _foldLibrary = Section(_foldLibrary, "预设库");
-            if (_foldLibrary) DrawPresetLibrary(s);
+            DrawSearchBar();
 
-            _foldCrop = Section(_foldCrop, "裁剪与旋转");
-            if (_foldCrop) DrawCrop(s);
+            if (Group("library")) DrawPresetLibrary(s);
 
-            _foldLog = Section(_foldLog, "素材解码与校色基准");
-            if (_foldLog)
+            if (Group("crop")) DrawCrop(s);
+
+            if (Group("log"))
             {
                 EditorGUI.BeginChangeCheck();
                 var lm = (LogMode)EditorGUILayout.EnumPopup("LOG 编码", (LogMode)s.logMode);
@@ -98,8 +106,7 @@ namespace Love.EditorTools
                                             MessageType.Warning);
             }
 
-            _foldQuality = Section(_foldQuality, "画质提升");
-            if (_foldQuality)
+            if (Group("quality"))
             {
                 Slider("降噪", ref s.denoise, 0f, 1f);
                 Slider("通透度", ref s.clarity, -1f, 1f);
@@ -114,8 +121,7 @@ namespace Love.EditorTools
                                         MessageType.None);
             }
 
-            _foldPrimary = Section(_foldPrimary, "曝光与白平衡");
-            if (_foldPrimary)
+            if (Group("primary"))
             {
                 Slider("曝光", ref s.exposure, -3f, 3f);
                 Slider("色温", ref s.temperature, -1f, 1f);
@@ -123,8 +129,7 @@ namespace Love.EditorTools
                 EnumField("色调映射", ref s.tonemap);
             }
 
-            _foldLevels = Section(_foldLevels, "色阶");
-            if (_foldLevels)
+            if (Group("levels"))
             {
                 Slider("输入黑点", ref s.inBlack, 0f, 0.5f);
                 Slider("输入白点", ref s.inWhite, 0.5f, 1f);
@@ -133,11 +138,9 @@ namespace Love.EditorTools
                 Slider("输出白点", ref s.outWhite, 0.5f, 1f);
             }
 
-            _foldWheels = Section(_foldWheels, "色轮  Lift / Gamma / Gain / Offset");
-            if (_foldWheels) DrawColorWheels(s);
+            if (Group("wheels")) DrawColorWheels(s);
 
-            _foldGrade = Section(_foldGrade, "反差、色彩与色调分离");
-            if (_foldGrade)
+            if (Group("grade"))
             {
                 Slider("对比度", ref s.contrast, 0f, 2f);
                 Slider("高光", ref s.highlights, -1f, 1f);
@@ -154,14 +157,11 @@ namespace Love.EditorTools
                 Slider("分界平衡", ref s.splitBalance, -0.5f, 0.5f);
             }
 
-            _foldCurve = Section(_foldCurve, "曲线");
-            if (_foldCurve) DrawCurves(s);
+            if (Group("curve")) DrawCurves(s);
 
-            _foldHsl = Section(_foldHsl, "HSL 八色带混合器");
-            if (_foldHsl) DrawHslMixer(s);
+            if (Group("hsl")) DrawHslMixer(s);
 
-            _foldSix = Section(_foldSix, "六条曲线");
-            if (_foldSix)
+            if (Group("sixcurve"))
             {
                 Toggle("启用六条曲线", ref s.sixCurveEnabled);
                 using (new EditorGUI.DisabledScope(!s.sixCurveEnabled))
@@ -183,11 +183,9 @@ namespace Love.EditorTools
                 }
             }
 
-            _foldSecondary = Section(_foldSecondary, "二级校色（Power Window / HSL 限定器）");
-            if (_foldSecondary) DrawSecondary(s);
+            if (Group("secondary")) DrawSecondary(s);
 
-            _foldMask = Section(_foldMask, "AI 蒙版用法");
-            if (_foldMask)
+            if (Group("aimask"))
             {
                 EditorGUILayout.HelpBox("先在上面生成蒙版，这里的参数才有效果。", MessageType.None);
                 Slider("背景虚化", ref s.backgroundBlur, 0f, 1f);
@@ -197,8 +195,7 @@ namespace Love.EditorTools
                 Toggle("二级校色叠加蒙版", ref s.secondaryUseMask);
             }
 
-            _foldEffect = Section(_foldEffect, "效果");
-            if (_foldEffect)
+            if (Group("effect"))
             {
                 Slider("辉光阈值", ref s.bloomThreshold, 0f, 2f);
                 Slider("辉光强度", ref s.bloomIntensity, 0f, 3f);
@@ -779,10 +776,89 @@ namespace Love.EditorTools
 
         #endregion
 
+        /// <summary>
+        /// 画一个分组标题，返回要不要画它的内容。
+        ///
+        /// 搜索状态下：没命中的组连标题都不画，命中的强制展开——但<b>不写回</b>
+        /// 折叠状态。否则清掉搜索词以后，所有组都会变成展开的。
+        /// </summary>
+        bool Group(string key)
+        {
+            int idx = Array.FindIndex(Groups, g => g.key == key);
+            if (idx < 0) return true;
+            var g2 = Groups[idx];
+
+            if (Filtering)
+            {
+                if (!Matches(g2)) return false;
+                Section(true, g2.title);
+                return true;
+            }
+
+            bool open = GetFold(key, g2.open);
+            bool now = Section(open, g2.title);
+            if (now != open) SetFold(key, now);
+            return now;
+        }
+
+        bool Matches((string key, string title, bool open, string words) g)
+        {
+            string f = _filter.Trim().ToLowerInvariant();
+            if (f.Length == 0) return true;
+            return g.title.ToLowerInvariant().Contains(f) || g.words.ToLowerInvariant().Contains(f);
+        }
+
+        /// <summary>
+        /// 搜索 + 全部展开 / 全部折叠。
+        ///
+        /// 过滤按<b>分组</b>做而不是逐个控件：IMGUI 是即时模式，画标题的时候
+        /// 还不知道这一组里有没有命中的控件，画完了又没法把标题收回去。
+        /// 所以每组带一串关键词，命中就整组展开。
+        /// </summary>
+        void DrawSearchBar()
+        {
+            EditorGUILayout.BeginHorizontal();
+
+            EditorGUI.BeginChangeCheck();
+            string f = EditorGUILayout.TextField(_filter, EditorStyles.toolbarSearchField);
+            if (EditorGUI.EndChangeCheck()) _filter = f;
+
+            using (new EditorGUI.DisabledScope(Filtering))
+            {
+                if (GUILayout.Button(new GUIContent("▾", "全部展开"), EditorStyles.miniButtonLeft, GUILayout.Width(22f)))
+                    foreach (var g in Groups) SetFold(g.key, true);
+                if (GUILayout.Button(new GUIContent("▸", "全部折叠"), EditorStyles.miniButtonRight, GUILayout.Width(22f)))
+                    foreach (var g in Groups) SetFold(g.key, false);
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            if (!Filtering) return;
+
+            int hit = 0;
+            foreach (var g in Groups) if (Matches(g)) hit++;
+            if (hit == 0)
+                EditorGUILayout.HelpBox($"没有匹配「{_filter}」的分组。搜的是分组名和它的关键词，不是每一根滑条。",
+                                        MessageType.Info);
+        }
+
         public static bool Section(bool state, string title)
         {
-            EditorGUILayout.Space(2f);
-            return EditorGUILayout.Foldout(state, title, true, EditorStyles.foldoutHeader);
+            EditorGUILayout.Space(3f);
+
+            var r = GUILayoutUtility.GetRect(GUIContent.none, GradeSkin.SectionHeader,
+                                             GUILayout.ExpandWidth(true));
+
+            // GetRect 在 Layout 事件返回的是占位矩形，那时候画色条位置是错的
+            if (Event.current.type == EventType.Repaint)
+            {
+                // 展开的组左边给一道强调色，一眼看出当前摊开了哪几组
+                GradeSkin.Line(r.x, r.y + 2f, 2f, r.height - 4f,
+                               state ? GradeSkin.Accent : GradeSkin.Grip);
+            }
+
+            var inner = new Rect(r.x + 7f, r.y, r.width - 7f, r.height);
+            return EditorGUI.Foldout(inner, state, title, true, GradeSkin.SectionHeader);
         }
 
         void Slider(string label, ref float value, float min, float max)

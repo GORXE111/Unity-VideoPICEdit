@@ -111,6 +111,8 @@ AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
 SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
 GradeCanvas          预览画布：棋盘底 / 缩放平移 / 硬裁剪，只摆图不渲染
+GradeToolbar         会自己收纳的工具栏：先声明、后测量、再绘制
+GradeSkin            三个窗口统一的配色、尺寸与样式
 FfmpegTool           ffmpeg 定位与命令行拼装（解码、编码、单帧抓取、ffprobe）
 ```
 
@@ -185,6 +187,10 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   `Application.isBatchMode` 跳过**，否则进程会一直卡着等人点。
 - **分支和循环内 `tex2D` 的隐式梯度是未定义的**，要用 `tex2Dlod` 显式指定 lod。
 - **`GUILayoutUtility.GetRect` 在 Layout 事件返回占位矩形**，绘制要判 `Event.current.type == Repaint`。
+- **`GUILayout` 排不下时不会报错，只会把控件默默挤没**。工具栏这种固定宽度的横排
+  必须自己测量：三个窗口的工具栏都走 `GradeToolbar`，宽度不够就按优先级撤进 `⋯` 菜单。
+- **画布的键盘快捷键要给文本框让位**。`OnGUI` 里画布排在参数栏之前，不判
+  `EditorGUIUtility.editingTextField` 的话，在搜索框里敲 "f" 会被当成「适应窗口」。
 - **`PopupWindow` 是跨帧的**，回调触发时调用方早已返回，`ref` 参数指向的栈位置失效。
   弹窗类控件要把值直接写回引用类型对象，并且 `BeginChangeCheck` 捕捉不到它们的改动。
 - **`Undo.RecordObject` 必须在改动之前调用**，事后记录存进撤销栈的是新状态，Ctrl+Z 回不去。

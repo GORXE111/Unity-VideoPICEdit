@@ -77,7 +77,7 @@ namespace Love.EditorTools
         /// </summary>
         public void Draw(Rect area, Texture preview, int imgW, int imgH)
         {
-            EditorGUI.DrawRect(area, new Color(0.13f, 0.14f, 0.16f));
+            EditorGUI.DrawRect(area, GradeSkin.Canvas);
 
             if (preview == null || imgW <= 0 || imgH <= 0)
             {
@@ -105,11 +105,8 @@ namespace Love.EditorTools
             GUI.DrawTexture(local, preview, ScaleMode.StretchToFill, true);
 
             // 一圈细描边，缩小时更清楚边界在哪
-            var edge = new Color(0f, 0f, 0f, 0.55f);
-            EditorGUI.DrawRect(new Rect(local.x - 1f, local.y - 1f, local.width + 2f, 1f), edge);
-            EditorGUI.DrawRect(new Rect(local.x - 1f, local.yMax, local.width + 2f, 1f), edge);
-            EditorGUI.DrawRect(new Rect(local.x - 1f, local.y, 1f, local.height), edge);
-            EditorGUI.DrawRect(new Rect(local.xMax, local.y, 1f, local.height), edge);
+            GradeSkin.Frame(new Rect(local.x - 1f, local.y - 1f, local.width + 2f, local.height + 2f),
+                            GradeSkin.Edge);
 
             GUI.EndGroup();
         }
@@ -140,6 +137,10 @@ namespace Love.EditorTools
         {
             var e = Event.current;
             if (e.type == EventType.Layout) return false;
+
+            // 正在文本框里打字时，别把按键抢走。画布的 HandleInput 排在参数栏之前，
+            // 不加这道判断的话，在搜索框里敲 "f" 会被当成"适应窗口"，字根本输不进去
+            if (EditorGUIUtility.editingTextField) return false;
 
             if (e.type == EventType.KeyDown)
             {
@@ -188,20 +189,5 @@ namespace Love.EditorTools
             return false;
         }
 
-        // ---------------- 分隔条 ----------------
-
-        /// <summary>可拖拽分隔条的外观。拖拽逻辑由调用方管，因为每个窗口的边界不一样。</summary>
-        public static void DrawSplitter(Rect r, bool vertical)
-        {
-            EditorGUIUtility.AddCursorRect(r, vertical ? MouseCursor.ResizeHorizontal : MouseCursor.ResizeVertical);
-            if (Event.current.type != EventType.Repaint) return;
-
-            EditorGUI.DrawRect(r, new Color(0.13f, 0.14f, 0.16f));
-            // 中间一道浅色，让人看出这里能拖
-            var grip = vertical
-                ? new Rect(r.center.x - 0.5f, r.center.y - 14f, 1f, 28f)
-                : new Rect(r.center.x - 14f, r.center.y - 0.5f, 28f, 1f);
-            EditorGUI.DrawRect(grip, new Color(1f, 1f, 1f, 0.22f));
-        }
     }
 }
