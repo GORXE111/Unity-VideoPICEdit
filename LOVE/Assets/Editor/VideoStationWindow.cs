@@ -104,6 +104,7 @@ namespace Love.EditorTools
         bool _dirty = true;
 
         readonly GradeCanvas _canvas = new GradeCanvas();
+        readonly MaskOverlay _maskOverlay = new MaskOverlay();
         readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
         Vector2 _paramScroll;
 
@@ -720,13 +721,18 @@ namespace Love.EditorTools
                 return;
             }
 
-            if (_canvas.HandleInput(r)) Repaint();
+            if (_canvas.HandleInput(r, _maskOverlay.Dragging)) Repaint();
             if (_canvas.ConsumeCompareChanged()) _dirty = true;
             HandleTransportKeys();
 
             // 裁剪会改变输出尺寸，画布按变换后的来摆
             _settings.OutputSize(_srcW, _srcH, out int ow, out int oh);
             _canvas.Draw(r, _preview, ow, oh);
+
+            var shape = _gui.Masks.EditingPart;
+            _maskOverlay.Draw(r, _canvas.ImageRect, shape);
+            _maskOverlay.HandleInput(_canvas.ImageRect, shape,
+                                     s2 => Undo.RecordObject(this, s2), () => _dirty = true);
 
             HandleDragAndDrop(r);
         }

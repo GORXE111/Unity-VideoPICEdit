@@ -29,6 +29,12 @@ namespace Love.EditorTools
         /// <summary>正在手绘的那个部件，窗口据此接管画布上的鼠标。null 表示没在画。</summary>
         public MaskPart PaintingPart { get; private set; }
 
+        /// <summary>正在画布上拖形状的那个部件。只有几何类部件才可能是它。</summary>
+        public MaskPart EditingPart { get; private set; }
+
+        /// <summary>笔刷的大小 / 硬度 / 流量画在哪。这几个参数是窗口的，不属于蒙版数据。</summary>
+        public Action DrawBrushOptions { get; set; }
+
         Action<string> _recordUndo;
         Action _markChanged;
         int _expanded = -1;      // 展开了哪一组的细节
@@ -81,6 +87,7 @@ namespace Love.EditorTools
                 var menu = new GenericMenu();
                 foreach (var a in Adders)
                 {
+                    if (!Supported(a.shape)) continue;
                     var shape = a.shape;
                     string label = a.label;
                     menu.AddItem(new GUIContent(label + "|" + a.tip), false, () => AddGroup(s, shape, label));
@@ -102,6 +109,14 @@ namespace Love.EditorTools
             _expanded = s.maskGroups.Count - 1;
             _markChanged?.Invoke();
         }
+
+        /// <summary>
+        /// 这个窗口支不支持某种来源。
+        ///
+        /// 视频台没有笔刷画布（逐帧手绘也跟不住运动），列出来只会得到一个用不了的部件——
+        /// 与其加完再提示"删掉重来"，不如一开始就不给。
+        /// </summary>
+        bool Supported(MaskShape shape) => shape != MaskShape.Brush || RequestBrush != null;
 
         MaskPart NewPart(MaskShape shape, bool first)
         {
@@ -202,13 +217,21 @@ namespace Love.EditorTools
                 {
                     bool painting = ReferenceEquals(PaintingPart, p);
                     bool want = GUILayout.Toggle(painting, "涂抹", EditorStyles.miniButton, GUILayout.Width(38f));
-                    if (want != painting) PaintingPart = want ? p : null;
+                    if (want != painting) { PaintingPart = want ? p : null; if (want) EditingPart = null; }
+                }
+                else if (p.IsGeometric)
+                {
+                    // 只靠滑条对位置基本等于盲调，得能在画面上直接拖
+                    bool editing = ReferenceEquals(EditingPart, p);
+                    bool want = GUILayout.Toggle(editing, "定位", EditorStyles.miniButton, GUILayout.Width(38f));
+                    if (want != editing) { EditingPart = want ? p : null; if (want) PaintingPart = null; }
                 }
 
                 if (GUILayout.Button("×", EditorStyles.miniButton, GUILayout.Width(22f)))
                 {
                     _recordUndo?.Invoke("删除部件");
                     if (ReferenceEquals(PaintingPart, p)) PaintingPart = null;
+                    if (ReferenceEquals(EditingPart, p)) EditingPart = null;
                     g.parts.RemoveAt(i);
                     _markChanged?.Invoke();
                     EditorGUILayout.EndHorizontal();
@@ -228,6 +251,7 @@ namespace Love.EditorTools
                 var menu = new GenericMenu();
                 foreach (var a in Adders)
                 {
+                    if (!Supported(a.shape)) continue;
                     var shape = a.shape;
                     menu.AddItem(new GUIContent(a.label), false, () =>
                     {
@@ -254,6 +278,9 @@ namespace Love.EditorTools
                         p.Shape == MaskShape.LinearGradient ? "方向与跨度" : "半径", p.size);
                     p.rotation = EditorGUILayout.Slider("旋转", p.rotation, -180f, 180f);
                     p.feather = EditorGUILayout.Slider("羽化", p.feather, 0.001f, 1f);
+                    if (ReferenceEquals(EditingPart, p))
+                        EditorGUILayout.HelpBox("正在画面上调整：拖黄点移动，白点改大小，蓝点转角度。",
+                                                MessageType.Info);
                     break;
 
                 case MaskShape.ColorRange:
@@ -287,8 +314,10 @@ namespace Love.EditorTools
                     if (p.brushId < 0)
                         EditorGUILayout.HelpBox("这个笔刷没有分配到画布，删掉重新添加一次。", MessageType.Warning);
                     else if (ReferenceEquals(PaintingPart, p))
-                        EditorGUILayout.HelpBox("正在涂抹：在画面上拖拽即可。按住 Alt 擦除。",
-                                                MessageType.Info);
+                    {
+                        EditorGUILayout.HelpBox("正在涂抹：在画面上拖拽即可，按住 Alt 擦除。", MessageType.Info);
+                        DrawBrushOptions?.Invoke();
+                    }
                     break;
             }
 

@@ -126,6 +126,7 @@ namespace Love.EditorTools
 
         // 存 Texture 而不是 RenderTexture：IList<T> 是不变的，
         // List<RenderTexture> 递不进 Options.brushes 那个 IList<Texture>
+        readonly MaskOverlay _maskOverlay = new MaskOverlay();
         readonly List<Texture> _brushes = new List<Texture>();
         Material _brushMat;
         [SerializeField] float _brushRadius = 0.06f;   // 相对画面短边
@@ -466,6 +467,7 @@ namespace Love.EditorTools
 
             EditorGUI.BeginChangeCheck();
             _gui.Masks.RequestBrush = NewBrush;
+            _gui.Masks.DrawBrushOptions = DrawBrushOptions;
             _gui.Masks.HasSubjectMask = CurrentMask != null;
             _gui.Masks.HasDepthMap = CurrentMask != null;
             _gui.PreviewTexture = _preview;
@@ -501,7 +503,7 @@ namespace Love.EditorTools
 
             // 裁剪框 / 色卡角点 / 笔刷正在用时，别让画布平移抢走事件
             bool block = (_chartMode && _chartDragIndex >= 0) || (_cropMode && _cropDrag >= 0)
-                         || _gui.Masks.PaintingPart != null;
+                         || _gui.Masks.PaintingPart != null || _maskOverlay.Dragging;
             if (_canvas.HandleInput(r, block)) Repaint();
             // 按住反斜杠看原图。不直接写 _bypass，那会把用户自己按下的对比按钮状态冲掉
             if (_canvas.ConsumeCompareChanged()) _dirty = true;
@@ -512,7 +514,14 @@ namespace Love.EditorTools
 
             if (_cropMode) DrawCropOverlay(r, img);
             if (_chartMode) DrawChartOverlay(r, img);
-            if (!HandleBrushInput(img)) HandlePickInput(img);
+
+            // 裁剪模式下画布显示的是未裁剪的整幅，而蒙版坐标是裁剪之后的，两者对不上
+            var shape = _cropMode ? null : _gui.Masks.EditingPart;
+            _maskOverlay.Draw(r, img, shape);
+            bool taken = _maskOverlay.HandleInput(img, shape, s => Undo.RecordObject(this, s),
+                                                  () => _dirty = true);
+
+            if (!taken && !HandleBrushInput(img)) HandlePickInput(img);
             HandleDragAndDrop(r);
         }
 
@@ -683,6 +692,37 @@ namespace Love.EditorTools
 
             _dabs.Clear();
             _dirty = true;
+        }
+
+        /// <summary>笔刷的大小 / 硬度 / 流量。画在蒙版面板里那个笔刷部件下面。</summary>
+        void DrawBrushOptions()
+        {
+            EditorGUI.BeginChangeCheck();
+            _brushRadius = EditorGUILayout.Slider(
+                new GUIContent("笔刷大小", "相对画面短边"), _brushRadius, 0.005f, 0.5f);
+            _brushHardness = EditorGUILayout.Slider(
+                new GUIContent("硬度", "0 全羽化，1 硬边"), _brushHardness, 0f, 1f);
+            _brushFlow = EditorGUILayout.Slider(
+                new GUIContent("流量", "单笔的强度。调低了可以一层层叠出柔和的过渡"), _brushFlow, 0.02f, 1f);
+            if (EditorGUI.EndChangeCheck()) Repaint();
+
+            if (GUILayout.Button("清空这支笔刷"))
+                _pendingAction = ClearCurrentBrush;
+        }
+
+        /// <summary>排队到 Update：清空是往 RT 上画东西，不能在 OnGUI 里做。</summary>
+        void ClearCurrentBrush()
+        {
+            var part = _gui.Masks.PaintingPart;
+            if (part == null || part.brushId < 0 || part.brushId >= _brushes.Count) return;
+            if (!(_brushes[part.brushId] is RenderTexture rt) || rt == null) return;
+
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            GL.Clear(false, true, Color.clear);
+            RenderTexture.active = prev;
+            _dirty = true;
+            Repaint();
         }
 
         /// <summary>画布上的涂抹。返回 true 表示这次事件被笔刷吃掉了，画布别再拿去平移。</summary>

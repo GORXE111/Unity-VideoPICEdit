@@ -56,7 +56,22 @@ dotnet "C:\Program Files\Unity 2022.3.62f3\Editor\Data\DotNetSdkRoslyn\csc.dll" 
 - 装了新包之后 rsp 里的路径会失效（包缓存重排），重新从 Bee 产物生成一份。
 - 要编到 `#if LOVE_SENTIS` 里的代码，rsp 得带 `-define:LOVE_SENTIS`。
 
-**这只能验 C#。HLSL 无法离线编译，shader 改动必须在 Unity 里确认。**
+### HLSL 也能离线编译
+
+```bash
+python Tools/shadercheck.py                 # 默认 VideoGrade.shader
+python Tools/shadercheck.py MaskBrush.shader
+```
+
+把 `CGPROGRAM..ENDCG` 抽出来（`CGINCLUDE` 块拼到前面），补上 Unity 会注入的那批宏，
+交给 Windows SDK 的 `fxc.exe` 编顶点和片元两个入口。带 `shader_feature` 的 Pass
+会把关键字全开和全关各编一遍。
+
+- **必须带 `/Gec`**（向后兼容）。Unity 自己的 `UnityShaderVariables.cginc` 里有全局
+  `half` 变量，SM4.0 严格模式下直接报错，看起来像是你的 shader 写错了。
+- fxc 有 arm64 / x64 / x86 三份，`find` 出来的第一个可能是 arm64，跑不起来。
+
+**这验的是能不能编译，不验画面对不对。** 着色逻辑仍然要进 Unity 看。
 
 ## 架构
 
