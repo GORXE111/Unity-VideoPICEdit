@@ -127,6 +127,20 @@ namespace Love.EditorTools
         // 存 Texture 而不是 RenderTexture：IList<T> 是不变的，
         // List<RenderTexture> 递不进 Options.brushes 那个 IList<Texture>
         readonly MaskOverlay _maskOverlay = new MaskOverlay();
+
+        // ---- 污点修复 / 仿制图章 ----
+        // 修补以一串 RepairSpot 存着、每次从原图重放，所以 _full 始终是干净的原图
+        readonly ImageRepair _repair = new ImageRepair();
+        [SerializeField] bool _repairMode;
+        [SerializeField] bool _repairClone;        // true = 仿制图章（源自己指定）
+        [SerializeField] float _repairRadius = 0.03f;
+        [SerializeField] float _repairFeather = 0.35f;
+        Vector2? _cloneSource;                     // 仿制图章的取样点，Alt+点击设定
+        bool _repairDirty;                         // 需要重放修补
+
+        // 修补是逐图的。按路径存着，翻胶片条回来还在
+        readonly Dictionary<string, List<RepairSpot>> _repairByPath =
+            new Dictionary<string, List<RepairSpot>>();
         readonly List<Texture> _brushes = new List<Texture>();
         Material _brushMat;
         [SerializeField] float _brushRadius = 0.06f;   // 相对画面短边
@@ -173,6 +187,13 @@ namespace Love.EditorTools
             bool needRepaint = false;
 
             // 导出同样要 Blit + ReadPixels，也不能在 GUI 里跑
+            if (_repairDirty)
+            {
+                _repairDirty = false;
+                _repair.Rebuild(_full);      // 里面有 Blit，只能在这里做
+                _dirty = true;
+            }
+
             FlushDabs();
 
             if (_pendingAction != null)
@@ -206,6 +227,7 @@ namespace Love.EditorTools
             if (_materialCopy != null) { DestroyImmediate(_materialCopy); _materialCopy = null; }
             ReleasePreview();
             ReleaseBrushes();
+            _repair.Dispose();
             ClearEntries();
             if (_lut != null) { DestroyImmediate(_lut); _lut = null; }
 #if LOVE_SENTIS
@@ -373,6 +395,13 @@ namespace Love.EditorTools
             }, priority: 78, disabled: !has);
 
             // 吸管是一次性的：取完一次就自己关掉，免得下一次平移画面被当成取色
+            _tb.Toggle(_repairMode, "修复", 42f, v =>
+            {
+                _repairMode = v;
+                if (v) { _pickWb = false; _cropMode = false; }
+                Repaint();
+            }, priority: 77, disabled: !has, tooltip: "点一下去掉污点；按住 Alt 点是设仿制取样点");
+
             _tb.Toggle(_pickWb, "白平衡吸管", 76f, v => { _pickWb = v; Repaint(); },
                        priority: 76, disabled: !has);
             _tb.Button("自动色调", 62f, () => _pendingAction = AutoToneCurrent,
@@ -456,6 +485,8 @@ namespace Love.EditorTools
 
             DrawMaskBar();
             EditorGUILayout.Space(8f);
+            DrawRepairBar();
+            EditorGUILayout.Space(8f);
             DrawChartBar();
             EditorGUILayout.Space(8f);
             DrawLutBar();
@@ -503,7 +534,7 @@ namespace Love.EditorTools
 
             // 裁剪框 / 色卡角点 / 笔刷正在用时，别让画布平移抢走事件
             bool block = (_chartMode && _chartDragIndex >= 0) || (_cropMode && _cropDrag >= 0)
-                         || _gui.Masks.PaintingPart != null || _maskOverlay.Dragging;
+                         || _gui.Masks.PaintingPart != null || _maskOverlay.Dragging || _repairMode;
             if (_canvas.HandleInput(r, block)) Repaint();
             // 按住反斜杠看原图。不直接写 _bypass，那会把用户自己按下的对比按钮状态冲掉
             if (_canvas.ConsumeCompareChanged()) _dirty = true;
@@ -521,7 +552,9 @@ namespace Love.EditorTools
             bool taken = _maskOverlay.HandleInput(img, shape, s => Undo.RecordObject(this, s),
                                                   () => _dirty = true);
 
-            if (!taken && !HandleBrushInput(img)) HandlePickInput(img);
+            if (_repairMode) DrawRepairCursor(r, img);
+
+            if (!taken && !HandleRepairInput(img) && !HandleBrushInput(img)) HandlePickInput(img);
             HandleDragAndDrop(r);
         }
 
@@ -567,6 +600,9 @@ namespace Love.EditorTools
         }
 
         /// <summary>按原分辨率渲染。缩略图预览的话，Bloom 半径和颗粒尺寸都会和导出结果对不上。</summary>
+        /// <summary>喂给调色管线的那张图。有修补就用修补后的，没有就用原图。</summary>
+        Texture GradeSource => _repair.Result != null ? (Texture)_repair.Result : _full;
+
         void RenderPreview()
         {
             if (_full == null) return;
@@ -592,7 +628,7 @@ namespace Love.EditorTools
             bool prevCrop = _settings.cropEnabled;
             if (_cropMode) _settings.cropEnabled = false;
 
-            r.Render(_full, _preview, _settings, new VideoGradeRenderer.Options
+            r.Render(GradeSource, _preview, _settings, new VideoGradeRenderer.Options
             {
                 bypass = _bypass || _canvas.HoldCompare,
                 splitCompare = _splitCompare,
@@ -693,6 +729,159 @@ namespace Love.EditorTools
             _dabs.Clear();
             _dirty = true;
         }
+
+        #region 污点修复
+
+        /// <summary>画布上的光标环，让人看清这一笔会盖住多大一块。</summary>
+        void DrawRepairCursor(Rect canvas, Rect img)
+        {
+            if (Event.current.type != EventType.Repaint || _full == null) return;
+
+            var m = Event.current.mousePosition;
+            if (!canvas.Contains(m)) return;
+
+            GUI.BeginGroup(canvas);
+            var off = new Vector2(canvas.x, canvas.y);
+            Color prev = Handles.color;
+
+            // 半径是以画面高为单位的，屏幕上就是 img.height 倍
+            float rpx = _repairRadius * img.height;
+            Handles.color = new Color(1f, 1f, 1f, 0.9f);
+            DrawCircle(m - off, rpx);
+            Handles.color = new Color(1f, 1f, 1f, 0.35f);
+            DrawCircle(m - off, rpx * (1f + _repairFeather));
+
+            // 仿制模式下把取样点也画出来，不然不知道会从哪儿抄
+            if (_repairClone && _cloneSource.HasValue)
+            {
+                var sp = new Vector2(img.x + _cloneSource.Value.x * img.width,
+                                     img.y + (1f - _cloneSource.Value.y) * img.height) - off;
+                Handles.color = GradeSkin.Playhead;
+                DrawCircle(sp, rpx);
+                Handles.DrawAAPolyLine(1.2f, new Vector3(sp.x, sp.y, 0f),
+                                       new Vector3(m.x - off.x, m.y - off.y, 0f));
+            }
+
+            Handles.color = prev;
+            GUI.EndGroup();
+        }
+
+        static void DrawCircle(Vector2 c, float r)
+        {
+            const int N = 40;
+            var pts = new Vector3[N + 1];
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                pts[i] = new Vector3(c.x + Mathf.Cos(a) * r, c.y + Mathf.Sin(a) * r, 0f);
+            }
+            Handles.DrawAAPolyLine(1.4f, pts);
+        }
+
+        /// <summary>返回 true 表示事件被修复工具吃掉了。</summary>
+        bool HandleRepairInput(Rect img)
+        {
+            if (!_repairMode || _full == null) return false;
+
+            EditorGUIUtility.AddCursorRect(img, MouseCursor.ArrowPlus);
+            Repaint();   // 光标环要跟着鼠标走
+
+            var e = Event.current;
+            if (e.type == EventType.ScrollWheel && img.Contains(e.mousePosition))
+            {
+                // 滚轮改笔尖大小，和 PS 的 [ ] 一个意思但更顺手
+                _repairRadius = Mathf.Clamp(_repairRadius * (1f - e.delta.y * 0.08f), 0.003f, 0.3f);
+                e.Use();
+                return true;
+            }
+
+            if (e.type != EventType.MouseDown || e.button != 0 || !img.Contains(e.mousePosition))
+                return false;
+
+            float u = (e.mousePosition.x - img.x) / Mathf.Max(img.width, 1f);
+            float v = 1f - (e.mousePosition.y - img.y) / Mathf.Max(img.height, 1f);
+            var uv = CanvasUvToSource(new Vector2(u, v));
+
+            // Alt+点击 = 设仿制取样点，和 PS 一致
+            if (e.alt)
+            {
+                _cloneSource = uv;
+                _repairClone = true;
+                e.Use();
+                return true;
+            }
+
+            Undo.RecordObject(this, "污点修复");
+
+            Vector2? manual = null;
+            if (_repairClone && _cloneSource.HasValue)
+            {
+                manual = _cloneSource.Value;
+            }
+
+            _repair.Add(_full, uv, _repairRadius, _repairFeather, _repairClone, manual);
+            _repairDirty = true;
+            e.Use();
+            return true;
+        }
+
+        void DrawRepairBar()
+        {
+            EditorGUILayout.LabelField("污点修复 / 仿制图章", EditorStyles.boldLabel);
+
+            using (new EditorGUI.DisabledScope(_full == null))
+            {
+                bool on = EditorGUILayout.Toggle(
+                    new GUIContent("修复模式", "点画面去掉污点。按住 Alt 点是设仿制取样点，滚轮改笔尖大小"),
+                    _repairMode);
+                if (on != _repairMode)
+                {
+                    _repairMode = on;
+                    if (on) { _pickWb = false; _cropMode = false; }
+                }
+
+                EditorGUI.BeginChangeCheck();
+                _repairRadius = EditorGUILayout.Slider(
+                    new GUIContent("笔尖大小", "以画面高为单位。画布上滚轮也能改"), _repairRadius, 0.003f, 0.3f);
+                _repairFeather = EditorGUILayout.Slider(
+                    new GUIContent("羽化", "从笔尖边缘往外扩的过渡带"), _repairFeather, 0.02f, 1f);
+                if (EditorGUI.EndChangeCheck()) Repaint();
+
+                bool clone = EditorGUILayout.Toggle(
+                    new GUIContent("仿制图章", "关掉是自动找源的污点修复；打开要自己 Alt+点击指定取样点"),
+                    _repairClone);
+                if (clone != _repairClone) { _repairClone = clone; Repaint(); }
+
+                if (_repairClone && !_cloneSource.HasValue)
+                    EditorGUILayout.HelpBox("还没设取样点：按住 Alt 在画面上点一下。", MessageType.Warning);
+            }
+
+            EditorGUILayout.LabelField("已修补", $"{_repair.Spots.Count} 处");
+
+            EditorGUILayout.BeginHorizontal();
+            using (new EditorGUI.DisabledScope(_repair.Spots.Count == 0))
+            {
+                if (GUILayout.Button("撤销上一处"))
+                {
+                    Undo.RecordObject(this, "撤销修补");
+                    _repair.Spots.RemoveAt(_repair.Spots.Count - 1);
+                    _repairDirty = true;
+                }
+                if (GUILayout.Button("全部清除"))
+                {
+                    Undo.RecordObject(this, "清除修补");
+                    _repair.Spots.Clear();
+                    _repairDirty = true;
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_repair.Spots.Count > 40)
+                EditorGUILayout.HelpBox("修补处数很多。每处都要重放一趟全分辨率的 Blit，" +
+                                        "改动之后的重建会明显变慢。", MessageType.None);
+        }
+
+        #endregion
 
         /// <summary>笔刷的大小 / 硬度 / 流量。画在蒙版面板里那个笔刷部件下面。</summary>
         void DrawBrushOptions()
@@ -833,10 +1022,22 @@ namespace Love.EditorTools
             index = Mathf.Clamp(index, 0, _entries.Count - 1);
             if (index == _selected && _full != null) return;
 
+            // 换图之前先把当前这张的修补收好
+            StashRepairs();
+
             _selected = index;
 
             if (_full != null) { DestroyImmediate(_full); _full = null; }
             _full = LoadTextureFromFile(_entries[index].path);
+
+            // 取回这张图自己的修补。找源用的缩略图也得作废，
+            // 否则会拿上一张图去搜取样点
+            _repair.Spots.Clear();
+            if (_repairByPath.TryGetValue(_entries[index].path, out var saved))
+                _repair.Spots.AddRange(saved);
+            _repair.InvalidateProbe();
+            _cloneSource = null;
+            _repairDirty = true;
 
             _canvas.FitPending = true;
             _dirty = true;
@@ -920,6 +1121,15 @@ namespace Love.EditorTools
             if (_entries.Count > firstNew && (_selected < 0 || _pendingSelect == -2))
                 Select(firstNew);
             _pendingSelect = -1;
+        }
+
+        /// <summary>把当前图的修补记到路径下。换图和关窗前都要调。</summary>
+        void StashRepairs()
+        {
+            if (_selected < 0 || _selected >= _entries.Count) return;
+            string path = _entries[_selected].path;
+            if (_repair.Spots.Count > 0) _repairByPath[path] = new List<RepairSpot>(_repair.Spots);
+            else _repairByPath.Remove(path);
         }
 
         void ClearEntries()
@@ -1724,11 +1934,13 @@ namespace Love.EditorTools
                 r.GrainSeed = 7f;
                 // 批量导出时每张图的蒙版不同，只有当前这张能用已生成的
                 var opts = new VideoGradeRenderer.Options();
-                if (ReferenceEquals(tex, _full)) { opts.externalMask = CurrentMask; opts.depthMap = CurrentMask; }
+                // 批量导出别的图时不能套当前这张的蒙版和修补——它们是逐图的
+                bool isCurrent = ReferenceEquals(tex, _full);
+                if (isCurrent) { opts.externalMask = CurrentMask; opts.depthMap = CurrentMask; }
                 opts.lut = _lut;
                 opts.lutAmount = _lutAmount;
                 opts.brushes = _brushes;
-                r.Render(tex, rt, _settings, opts);
+                r.Render(isCurrent ? GradeSource : tex, rt, _settings, opts);
 
                 var prev = RenderTexture.active;
                 RenderTexture.active = rt;

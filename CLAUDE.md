@@ -124,6 +124,8 @@ GradePresetStore     预设读写，编辑器和运行时共用
 VideoGrade.shader    9 个 Pass，算法在 4 个 .cginc 里
 MaskBrush.shader     手绘笔刷，靠 BlendOp Max/Min 直接画进蒙版
 GradeMask            蒙版组与部件的数据（Lightroom 那套结构）
+ImageRepair          污点修复 / 仿制图章（编辑器侧），修补记录可重放
+ImageRepair.shader   修补一处：仿制 + 色调补偿
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
 SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
@@ -240,6 +242,12 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   整个编辑器跟着发涩。只在真有变化时重绘。
 - **风格化必须排在蒙版之后**。暗角、颗粒这些作用于整幅成片，放在蒙版之前的话，
   一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序。
+- **修补类工具的羽化要从笔尖边缘往外扩，不能往里收**。往里收的话污点的外圈补不到，
+  会留下一圈残影。
+- **启发式搜索的结果对浮点精度敏感**。`ImageRepair` 找取样源时，环上的采样点由
+  `cos/sin` 定，碰上 `cos(60°)×33 = 16.5` 这种正好落在舍入边界的情况，
+  float 和 double 会差一个像素，名次可能翻。所以这类算法的差分测试**不能比坐标是否逐位相同**，
+  要比"选中的那个点按参考实现的尺子量够不够好"。
 - **`IList<T>` 是不变的**。`List<RenderTexture>` 递不进 `IList<Texture>` 的参数，
   笔刷那批贴图只能直接存成 `List<Texture>`。
 - **不要用 `Directory.GetFiles(..., AllDirectories)` 找可执行文件**。
