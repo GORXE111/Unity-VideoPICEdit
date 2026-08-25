@@ -119,6 +119,25 @@ namespace Love.EditorTools
         [SerializeField] string _lutName = "";
         [SerializeField] float _lutAmount = 1f;
 
+        // ---- 手绘蒙版 ----
+        // 笔刷贴图进不了 JSON，所以由窗口持有，MaskPart 只存一个下标。
+        // 尺寸按源图但封顶：蒙版不需要 6100 万像素，2048 的图 bilinear 放大反而边更柔
+        const int BrushMax = 2048;
+
+        // 存 Texture 而不是 RenderTexture：IList<T> 是不变的，
+        // List<RenderTexture> 递不进 Options.brushes 那个 IList<Texture>
+        readonly List<Texture> _brushes = new List<Texture>();
+        Material _brushMat;
+        [SerializeField] float _brushRadius = 0.06f;   // 相对画面短边
+        [SerializeField] float _brushHardness = 0.4f;
+        [SerializeField] float _brushFlow = 0.6f;
+
+        /// <summary>笔迹只在 OnGUI 里登记，真正绘制排到 Update——GL 渲染和 Blit 一样不能出现在 OnGUI 里。</summary>
+        struct Dab { public int brush; public Vector2 uv; public float radius; public bool erase; }
+        readonly List<Dab> _dabs = new List<Dab>();
+        Vector2 _lastDabUv;
+        bool _dabbing;
+
         Vector2 _paramScroll, _filmScroll;
         readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
 
@@ -153,6 +172,8 @@ namespace Love.EditorTools
             bool needRepaint = false;
 
             // 导出同样要 Blit + ReadPixels，也不能在 GUI 里跑
+            FlushDabs();
+
             if (_pendingAction != null)
             {
                 var action = _pendingAction;
@@ -183,6 +204,7 @@ namespace Love.EditorTools
             _renderer = null;
             if (_materialCopy != null) { DestroyImmediate(_materialCopy); _materialCopy = null; }
             ReleasePreview();
+            ReleaseBrushes();
             ClearEntries();
             if (_lut != null) { DestroyImmediate(_lut); _lut = null; }
 #if LOVE_SENTIS
@@ -443,6 +465,9 @@ namespace Love.EditorTools
             EditorGUILayout.Space(6f);
 
             EditorGUI.BeginChangeCheck();
+            _gui.Masks.RequestBrush = NewBrush;
+            _gui.Masks.HasSubjectMask = CurrentMask != null;
+            _gui.Masks.HasDepthMap = CurrentMask != null;
             _gui.PreviewTexture = _preview;
             _gui.PanelWidth = r.width - 8f;
             _gui.SourceSize = _full != null ? new Vector2Int(_full.width, _full.height) : Vector2Int.zero;
@@ -474,8 +499,9 @@ namespace Love.EditorTools
                 return;
             }
 
-            // 裁剪框 / 色卡角点正在拖时，别让画布平移抢走事件
-            bool block = (_chartMode && _chartDragIndex >= 0) || (_cropMode && _cropDrag >= 0);
+            // 裁剪框 / 色卡角点 / 笔刷正在用时，别让画布平移抢走事件
+            bool block = (_chartMode && _chartDragIndex >= 0) || (_cropMode && _cropDrag >= 0)
+                         || _gui.Masks.PaintingPart != null;
             if (_canvas.HandleInput(r, block)) Repaint();
             // 按住反斜杠看原图。不直接写 _bypass，那会把用户自己按下的对比按钮状态冲掉
             if (_canvas.ConsumeCompareChanged()) _dirty = true;
@@ -486,7 +512,7 @@ namespace Love.EditorTools
 
             if (_cropMode) DrawCropOverlay(r, img);
             if (_chartMode) DrawChartOverlay(r, img);
-            HandlePickInput(img);
+            if (!HandleBrushInput(img)) HandlePickInput(img);
             HandleDragAndDrop(r);
         }
 
@@ -565,10 +591,140 @@ namespace Love.EditorTools
                 externalMask = CurrentMask,
                 lut = _lut,
                 lutAmount = _lutAmount,
+                brushes = _brushes,
+                depthMap = CurrentMask,   // 选了 MiDaS 时生成的就是深度图，和主体蒙版共用一张
             });
 
             _settings.cropEnabled = prevCrop;
             _dirty = false;
+        }
+
+        void ReleaseBrushes()
+        {
+            foreach (var t in _brushes)
+                if (t is RenderTexture rt) { rt.Release(); DestroyImmediate(rt); }
+            _brushes.Clear();
+            if (_brushMat != null) { DestroyImmediate(_brushMat); _brushMat = null; }
+        }
+
+        /// <summary>新开一张笔刷画布，返回它的下标。</summary>
+        int NewBrush()
+        {
+            int w = 1024, h = 1024;
+            if (_full != null)
+            {
+                float k = Mathf.Min(1f, BrushMax / (float)Mathf.Max(_full.width, _full.height));
+                w = Mathf.Max(16, Mathf.RoundToInt(_full.width * k));
+                h = Mathf.Max(16, Mathf.RoundToInt(_full.height * k));
+            }
+
+            // 蒙版是数据不是颜色，必须 Linear：走 sRGB 的话写进去 0.5 读出来就不是 0.5
+            var rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear)
+            { name = "MaskBrush" + _brushes.Count, hideFlags = HideFlags.HideAndDontSave,
+              wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+            rt.Create();
+
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            GL.Clear(false, true, Color.clear);      // 从全空起步
+            RenderTexture.active = prev;
+
+            _brushes.Add(rt);
+            return _brushes.Count - 1;
+        }
+
+        Material BrushMaterial
+        {
+            get
+            {
+                if (_brushMat != null) return _brushMat;
+                var sh = Shader.Find("Hidden/Love/MaskBrush");
+                if (sh == null) return null;
+                _brushMat = new Material(sh) { hideFlags = HideFlags.HideAndDontSave };
+                return _brushMat;
+            }
+        }
+
+        /// <summary>把登记下来的笔迹一次性画掉。只能在 Update 里调。</summary>
+        void FlushDabs()
+        {
+            if (_dabs.Count == 0) return;
+            var mat = BrushMaterial;
+            if (mat == null) { _dabs.Clear(); return; }
+
+            foreach (var d in _dabs)
+            {
+                if (d.brush < 0 || d.brush >= _brushes.Count) continue;
+                if (!(_brushes[d.brush] is RenderTexture rt) || rt == null) continue;
+
+                mat.SetFloat("_Hardness", _brushHardness);
+                mat.SetFloat("_Flow", _brushFlow);
+
+                // 半径按短边算，这样在长宽比不同的图上手感一致
+                float rx = d.radius * Mathf.Min(rt.width, rt.height) / rt.width;
+                float ry = d.radius * Mathf.Min(rt.width, rt.height) / rt.height;
+
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                mat.SetPass(d.erase ? 1 : 0);
+
+                GL.PushMatrix();
+                GL.LoadOrtho();
+                GL.Begin(GL.QUADS);
+                GL.TexCoord2(0f, 0f); GL.Vertex3(d.uv.x - rx, d.uv.y - ry, 0f);
+                GL.TexCoord2(1f, 0f); GL.Vertex3(d.uv.x + rx, d.uv.y - ry, 0f);
+                GL.TexCoord2(1f, 1f); GL.Vertex3(d.uv.x + rx, d.uv.y + ry, 0f);
+                GL.TexCoord2(0f, 1f); GL.Vertex3(d.uv.x - rx, d.uv.y + ry, 0f);
+                GL.End();
+                GL.PopMatrix();
+
+                RenderTexture.active = prev;
+            }
+
+            _dabs.Clear();
+            _dirty = true;
+        }
+
+        /// <summary>画布上的涂抹。返回 true 表示这次事件被笔刷吃掉了，画布别再拿去平移。</summary>
+        bool HandleBrushInput(Rect img)
+        {
+            var part = _gui.Masks.PaintingPart;
+            if (part == null || _full == null || part.brushId < 0) return false;
+
+            EditorGUIUtility.AddCursorRect(img, MouseCursor.ArrowPlus);
+
+            var e = Event.current;
+            bool down = e.type == EventType.MouseDown && e.button == 0 && img.Contains(e.mousePosition);
+            bool drag = e.type == EventType.MouseDrag && e.button == 0 && _dabbing;
+            if (!down && !drag)
+            {
+                if (e.type == EventType.MouseUp) _dabbing = false;
+                return _dabbing;
+            }
+
+            float u = (e.mousePosition.x - img.x) / Mathf.Max(img.width, 1f);
+            float v = 1f - (e.mousePosition.y - img.y) / Mathf.Max(img.height, 1f);
+            var uv = CanvasUvToSource(new Vector2(u, v));
+
+            var dab = new Dab { brush = part.brushId, radius = _brushRadius, erase = e.alt };
+
+            if (down) { _dabbing = true; _lastDabUv = uv; dab.uv = uv; _dabs.Add(dab); }
+            else
+            {
+                // 拖快了两个采样点之间会断开，中间补几笔
+                float dist = Vector2.Distance(uv, _lastDabUv);
+                int steps = Mathf.Clamp(Mathf.CeilToInt(dist / Mathf.Max(_brushRadius * 0.4f, 0.002f)), 1, 64);
+                for (int i = 1; i <= steps; i++)
+                {
+                    dab.uv = Vector2.Lerp(_lastDabUv, uv, i / (float)steps);
+                    _dabs.Add(dab);
+                }
+                _lastDabUv = uv;
+            }
+
+            e.Use();
+            Repaint();
+            return true;
         }
 
         void ReleasePreview()
@@ -1528,9 +1684,10 @@ namespace Love.EditorTools
                 r.GrainSeed = 7f;
                 // 批量导出时每张图的蒙版不同，只有当前这张能用已生成的
                 var opts = new VideoGradeRenderer.Options();
-                if (ReferenceEquals(tex, _full)) opts.externalMask = CurrentMask;
+                if (ReferenceEquals(tex, _full)) { opts.externalMask = CurrentMask; opts.depthMap = CurrentMask; }
                 opts.lut = _lut;
                 opts.lutAmount = _lutAmount;
+                opts.brushes = _brushes;
                 r.Render(tex, rt, _settings, opts);
 
                 var prev = RenderTexture.active;

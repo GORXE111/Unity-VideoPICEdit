@@ -1,0 +1,348 @@
+using System;
+using System.Collections.Generic;
+using Love.Video;
+using UnityEditor;
+using UnityEngine;
+
+namespace Love.EditorTools
+{
+    /// <summary>
+    /// 蒙版列表的界面。三个窗口共用。
+    ///
+    /// 结构照搬 Lightroom：一个蒙版组 = 若干部件（加 / 减 / 交）+ 一组自己的调整参数。
+    /// 关键是「显示」那个开关——调选区时必须能看见边界，靠猜是调不出来的。
+    /// </summary>
+    public class MaskListGUI
+    {
+        /// <summary>当前源图尺寸，几何部件的界面提示要用。</summary>
+        public Vector2Int SourceSize { get; set; }
+
+        /// <summary>有没有可用的 AI 主体蒙版。没有时「主体」部件会给出提示。</summary>
+        public bool HasSubjectMask { get; set; }
+
+        /// <summary>有没有可用的深度图。</summary>
+        public bool HasDepthMap { get; set; }
+
+        /// <summary>请求新建一张笔刷，返回它的 id。窗口负责真正分配那张 RT。</summary>
+        public Func<int> RequestBrush { get; set; }
+
+        /// <summary>正在手绘的那个部件，窗口据此接管画布上的鼠标。null 表示没在画。</summary>
+        public MaskPart PaintingPart { get; private set; }
+
+        Action<string> _recordUndo;
+        Action _markChanged;
+        int _expanded = -1;      // 展开了哪一组的细节
+
+        static readonly string[] OpNames = { "加", "减", "交" };
+
+        static readonly (MaskShape shape, string label, string tip)[] Adders =
+        {
+            (MaskShape.Ellipse,        "径向",     "椭圆选区，带羽化。提亮人脸、做局部光斑"),
+            (MaskShape.LinearGradient, "渐变",     "线性渐变。压天空、提前景全靠它"),
+            (MaskShape.Rect,           "矩形",     "矩形选区，带羽化"),
+            (MaskShape.Brush,          "画笔",     "手绘。任意形状，画多少选多少"),
+            (MaskShape.ColorRange,     "颜色范围", "按色相和饱和度圈一块，比如只调天空的蓝"),
+            (MaskShape.LuminanceRange, "亮度范围", "按亮度圈一块，比如只压高光"),
+            (MaskShape.DepthRange,     "深度范围", "按远近圈一块，需要先生成深度图"),
+            (MaskShape.Subject,        "AI 主体",  "分割模型抠出来的主体，需要先生成蒙版"),
+        };
+
+        public void Draw(VideoGradeSettings s, Action<string> recordUndo, Action markChanged)
+        {
+            _recordUndo = recordUndo;
+            _markChanged = markChanged;
+
+            if (s.maskGroups == null) s.maskGroups = new List<MaskGroup>();
+
+            DrawAddBar(s);
+
+            if (s.maskGroups.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "还没有蒙版。上面选一种来源新建一组。\n" +
+                    "一组里可以叠多个部件：比如「渐变」加上，再「减」掉主体，就是只压天空不压人。",
+                    MessageType.None);
+                return;
+            }
+
+            for (int i = 0; i < s.maskGroups.Count; i++)
+            {
+                if (DrawGroup(s, i)) { i--; }   // 被删掉了，下标退一格
+            }
+        }
+
+        void DrawAddBar(VideoGradeSettings s)
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("新建蒙版", EditorStyles.miniBoldLabel, GUILayout.Width(60f));
+
+            if (GUILayout.Button("＋", EditorStyles.miniButton, GUILayout.Width(26f)))
+            {
+                var menu = new GenericMenu();
+                foreach (var a in Adders)
+                {
+                    var shape = a.shape;
+                    string label = a.label;
+                    menu.AddItem(new GUIContent(label + "|" + a.tip), false, () => AddGroup(s, shape, label));
+                }
+                menu.ShowAsContext();
+            }
+
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.LabelField($"{s.maskGroups.Count} 组", EditorStyles.miniLabel, GUILayout.Width(40f));
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void AddGroup(VideoGradeSettings s, MaskShape shape, string label)
+        {
+            _recordUndo?.Invoke("新建蒙版");
+            var g = new MaskGroup { name = label };
+            g.parts.Add(NewPart(shape, true));
+            s.maskGroups.Add(g);
+            _expanded = s.maskGroups.Count - 1;
+            _markChanged?.Invoke();
+        }
+
+        MaskPart NewPart(MaskShape shape, bool first)
+        {
+            var p = new MaskPart { shape = (int)shape, op = first ? (int)MaskOp.Add : (int)MaskOp.Add };
+
+            if (shape == MaskShape.LinearGradient)
+            {
+                p.center = new Vector2(0.5f, 0.75f);
+                p.size = new Vector2(0.5f, 0.25f);
+            }
+            if (shape == MaskShape.Brush && RequestBrush != null) p.brushId = RequestBrush();
+            return p;
+        }
+
+        /// <summary>返回 true 表示这一组被删了。</summary>
+        bool DrawGroup(VideoGradeSettings s, int index)
+        {
+            var g = s.maskGroups[index];
+            bool expanded = _expanded == index;
+
+            var head = EditorGUILayout.GetControlRect(GUILayout.Height(20f));
+            if (Event.current.type == EventType.Repaint)
+                EditorGUI.DrawRect(head, expanded ? new Color(1f, 1f, 1f, 0.06f) : new Color(1f, 1f, 1f, 0.025f));
+
+            float x = head.x + 2f;
+
+            bool on = EditorGUI.Toggle(new Rect(x, head.y + 2f, 16f, 16f), g.enabled);
+            if (on != g.enabled) { _recordUndo?.Invoke("启用蒙版"); g.enabled = on; _markChanged?.Invoke(); }
+            x += 18f;
+
+            // 名字可以直接改。一屏五六组时，"蒙版 3"这种名字等于没有
+            EditorGUI.BeginChangeCheck();
+            string nm = EditorGUI.TextField(new Rect(x, head.y + 1f, head.width - 150f, 18f), g.name);
+            if (EditorGUI.EndChangeCheck()) { _recordUndo?.Invoke("重命名蒙版"); g.name = nm; }
+            x = head.xMax - 128f;
+
+            bool ov = GUI.Toggle(new Rect(x, head.y + 1f, 42f, 18f),
+                                 g.showOverlay, new GUIContent("显示", "把选区以红色叠加在画面上"),
+                                 EditorStyles.miniButton);
+            if (ov != g.showOverlay)
+            {
+                _recordUndo?.Invoke("显示蒙版");
+                // 一次只看一组，同时叠两片红的什么也看不出来
+                foreach (var other in s.maskGroups) other.showOverlay = false;
+                g.showOverlay = ov;
+                _markChanged?.Invoke();
+            }
+            x += 44f;
+
+            if (GUI.Button(new Rect(x, head.y + 1f, 42f, 18f),
+                           expanded ? "收起" : "编辑", EditorStyles.miniButton))
+                _expanded = expanded ? -1 : index;
+            x += 44f;
+
+            if (GUI.Button(new Rect(x, head.y + 1f, 22f, 18f), "×", EditorStyles.miniButton))
+            {
+                _recordUndo?.Invoke("删除蒙版");
+                s.maskGroups.RemoveAt(index);
+                if (_expanded >= s.maskGroups.Count) _expanded = -1;
+                _markChanged?.Invoke();
+                return true;
+            }
+
+            if (!expanded) return false;
+
+            EditorGUI.indentLevel++;
+            DrawParts(g);
+            EditorGUILayout.Space(3f);
+            DrawGroupAdjust(g);
+            EditorGUI.indentLevel--;
+            EditorGUILayout.Space(4f);
+            return false;
+        }
+
+        void DrawParts(MaskGroup g)
+        {
+            EditorGUILayout.LabelField("部件", EditorStyles.miniBoldLabel);
+
+            for (int i = 0; i < g.parts.Count; i++)
+            {
+                var p = g.parts[i];
+
+                EditorGUILayout.BeginHorizontal();
+
+                // 第一个部件恒按"加"处理，下拉框没有意义
+                using (new EditorGUI.DisabledScope(i == 0))
+                {
+                    int op = EditorGUILayout.Popup(i == 0 ? 0 : p.op, OpNames, GUILayout.Width(46f));
+                    if (i > 0 && op != p.op) { _recordUndo?.Invoke("蒙版合并方式"); p.op = op; _markChanged?.Invoke(); }
+                }
+
+                EditorGUILayout.LabelField(ShapeName(p.Shape), GUILayout.Width(70f));
+
+                bool inv = GUILayout.Toggle(p.invert, "反相", EditorStyles.miniButton, GUILayout.Width(38f));
+                if (inv != p.invert) { _recordUndo?.Invoke("蒙版反相"); p.invert = inv; _markChanged?.Invoke(); }
+
+                if (p.Shape == MaskShape.Brush)
+                {
+                    bool painting = ReferenceEquals(PaintingPart, p);
+                    bool want = GUILayout.Toggle(painting, "涂抹", EditorStyles.miniButton, GUILayout.Width(38f));
+                    if (want != painting) PaintingPart = want ? p : null;
+                }
+
+                if (GUILayout.Button("×", EditorStyles.miniButton, GUILayout.Width(22f)))
+                {
+                    _recordUndo?.Invoke("删除部件");
+                    if (ReferenceEquals(PaintingPart, p)) PaintingPart = null;
+                    g.parts.RemoveAt(i);
+                    _markChanged?.Invoke();
+                    EditorGUILayout.EndHorizontal();
+                    i--;
+                    continue;
+                }
+
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUI.indentLevel++;
+                DrawPartBody(p);
+                EditorGUI.indentLevel--;
+            }
+
+            if (GUILayout.Button("＋ 添加部件", EditorStyles.miniButton))
+            {
+                var menu = new GenericMenu();
+                foreach (var a in Adders)
+                {
+                    var shape = a.shape;
+                    menu.AddItem(new GUIContent(a.label), false, () =>
+                    {
+                        _recordUndo?.Invoke("添加部件");
+                        g.parts.Add(NewPart(shape, false));
+                        _markChanged?.Invoke();
+                    });
+                }
+                menu.ShowAsContext();
+            }
+        }
+
+        void DrawPartBody(MaskPart p)
+        {
+            EditorGUI.BeginChangeCheck();
+
+            switch (p.Shape)
+            {
+                case MaskShape.Ellipse:
+                case MaskShape.Rect:
+                case MaskShape.LinearGradient:
+                    p.center = EditorGUILayout.Vector2Field("中心", p.center);
+                    p.size = EditorGUILayout.Vector2Field(
+                        p.Shape == MaskShape.LinearGradient ? "方向与跨度" : "半径", p.size);
+                    p.rotation = EditorGUILayout.Slider("旋转", p.rotation, -180f, 180f);
+                    p.feather = EditorGUILayout.Slider("羽化", p.feather, 0.001f, 1f);
+                    break;
+
+                case MaskShape.ColorRange:
+                    p.hueCenter = EditorGUILayout.Slider("色相中心", p.hueCenter, 0f, 1f);
+                    p.hueRange = EditorGUILayout.Slider("色相范围", p.hueRange, 0f, 0.5f);
+                    p.hueSoft = EditorGUILayout.Slider("色相柔和", p.hueSoft, 0.001f, 0.3f);
+                    MinMax("饱和度区间", ref p.satMin, ref p.satMax, 0f, 1f);
+                    p.satSoft = EditorGUILayout.Slider("饱和柔和", p.satSoft, 0.001f, 0.5f);
+                    break;
+
+                case MaskShape.LuminanceRange:
+                    MinMax("亮度区间", ref p.lumMin, ref p.lumMax, 0f, 1f);
+                    p.lumSoft = EditorGUILayout.Slider("柔和", p.lumSoft, 0.001f, 0.5f);
+                    break;
+
+                case MaskShape.DepthRange:
+                    MinMax("深度区间", ref p.depthMin, ref p.depthMax, 0f, 1f);
+                    p.depthSoft = EditorGUILayout.Slider("柔和", p.depthSoft, 0.001f, 0.5f);
+                    if (!HasDepthMap)
+                        EditorGUILayout.HelpBox("还没有深度图，这个部件目前不选中任何东西。" +
+                                                "去「AI 蒙版」里选 MiDaS 模型生成一张。", MessageType.Warning);
+                    break;
+
+                case MaskShape.Subject:
+                    if (!HasSubjectMask)
+                        EditorGUILayout.HelpBox("还没有主体蒙版，这个部件目前不选中任何东西。" +
+                                                "去「AI 蒙版」里用 IS-Net 生成一张。", MessageType.Warning);
+                    break;
+
+                case MaskShape.Brush:
+                    if (p.brushId < 0)
+                        EditorGUILayout.HelpBox("这个笔刷没有分配到画布，删掉重新添加一次。", MessageType.Warning);
+                    else if (ReferenceEquals(PaintingPart, p))
+                        EditorGUILayout.HelpBox("正在涂抹：在画面上拖拽即可。按住 Alt 擦除。",
+                                                MessageType.Info);
+                    break;
+            }
+
+            p.opacity = EditorGUILayout.Slider("不透明度", p.opacity, 0f, 1f);
+
+            if (!EditorGUI.EndChangeCheck()) return;
+            _recordUndo?.Invoke("调整蒙版部件");
+            _markChanged?.Invoke();
+        }
+
+        void DrawGroupAdjust(MaskGroup g)
+        {
+            EditorGUILayout.LabelField("这一组的调整", EditorStyles.miniBoldLabel);
+
+            EditorGUI.BeginChangeCheck();
+            g.exposure = EditorGUILayout.Slider("曝光", g.exposure, -2f, 2f);
+            g.contrast = EditorGUILayout.Slider("对比度", g.contrast, 0f, 2f);
+            g.highlights = EditorGUILayout.Slider("高光", g.highlights, -1f, 1f);
+            g.shadows = EditorGUILayout.Slider("阴影", g.shadows, -1f, 1f);
+            g.saturation = EditorGUILayout.Slider("饱和度", g.saturation, 0f, 2f);
+            g.hueShift = EditorGUILayout.Slider("色相", g.hueShift, -0.5f, 0.5f);
+            g.tintHue = EditorGUILayout.Slider("染色色相", g.tintHue, 0f, 1f);
+            g.tintStrength = EditorGUILayout.Slider("染色强度", g.tintStrength, 0f, 1f);
+            if (!EditorGUI.EndChangeCheck()) return;
+
+            _recordUndo?.Invoke("调整蒙版参数");
+            _markChanged?.Invoke();
+        }
+
+        static void MinMax(string label, ref float lo, ref float hi, float limitMin, float limitMax)
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.PrefixLabel(label);
+            lo = EditorGUILayout.FloatField(lo, GUILayout.Width(46f));
+            EditorGUILayout.MinMaxSlider(ref lo, ref hi, limitMin, limitMax);
+            hi = EditorGUILayout.FloatField(hi, GUILayout.Width(46f));
+            EditorGUILayout.EndHorizontal();
+            // 上下限交叉的话区间隶属度恒为 0，界面上看起来就是"蒙版突然全没了"
+            if (hi < lo + 0.005f) hi = lo + 0.005f;
+        }
+
+        static string ShapeName(MaskShape s)
+        {
+            switch (s)
+            {
+                case MaskShape.Ellipse: return "径向";
+                case MaskShape.Rect: return "矩形";
+                case MaskShape.LinearGradient: return "渐变";
+                case MaskShape.ColorRange: return "颜色范围";
+                case MaskShape.LuminanceRange: return "亮度范围";
+                case MaskShape.DepthRange: return "深度范围";
+                case MaskShape.Subject: return "AI 主体";
+                default: return "画笔";
+            }
+        }
+    }
+}

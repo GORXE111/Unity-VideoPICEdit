@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Love.Video
@@ -24,6 +25,15 @@ namespace Love.Video
             /// <summary>导入的 .cube LUT。每个 look 一张，不属于参数集。</summary>
             public Texture3D lut;
             public float lutAmount;
+
+            /// <summary>深度图。深度范围蒙版要用，没有时那种部件退化成全选。</summary>
+            public Texture depthMap;
+
+            /// <summary>
+            /// 手绘笔刷贴图，按 <see cref="MaskPart.brushId"/> 取。
+            /// 贴图进不了 JSON，所以由窗口持有、渲染时递进来。
+            /// </summary>
+            public IList<Texture> brushes;
 
             public static Options Default => new Options { splitPosition = 0.5f };
         }
@@ -114,6 +124,31 @@ namespace Love.Video
         static readonly int IdCropRect    = Shader.PropertyToID("_CropRect");
         static readonly int IdStraighten  = Shader.PropertyToID("_Straighten");
         static readonly int IdGeoFlags    = Shader.PropertyToID("_GeoFlags");
+        static readonly int IdRawTex      = Shader.PropertyToID("_RawTex");
+        static readonly int IdPrevMask    = Shader.PropertyToID("_PrevMask");
+        static readonly int IdPartTex     = Shader.PropertyToID("_PartTex");
+        static readonly int IdDepthTex    = Shader.PropertyToID("_DepthTex");
+        static readonly int IdPartShape   = Shader.PropertyToID("_PartShape");
+        static readonly int IdPartOp      = Shader.PropertyToID("_PartOp");
+        static readonly int IdPartInvert  = Shader.PropertyToID("_PartInvert");
+        static readonly int IdPartOpacity = Shader.PropertyToID("_PartOpacity");
+        static readonly int IdPartCenter  = Shader.PropertyToID("_PartCenter");
+        static readonly int IdPartSize    = Shader.PropertyToID("_PartSize");
+        static readonly int IdPartRot     = Shader.PropertyToID("_PartRot");
+        static readonly int IdPartFeather = Shader.PropertyToID("_PartFeather");
+        static readonly int IdPartHue     = Shader.PropertyToID("_PartHue");
+        static readonly int IdPartSat     = Shader.PropertyToID("_PartSat");
+        static readonly int IdPartLum     = Shader.PropertyToID("_PartLum");
+        static readonly int IdPartDepth   = Shader.PropertyToID("_PartDepth");
+        static readonly int IdGroupMask   = Shader.PropertyToID("_GroupMask");
+        static readonly int IdGExposure   = Shader.PropertyToID("_GExposure");
+        static readonly int IdGContrast   = Shader.PropertyToID("_GContrast");
+        static readonly int IdGHighlights = Shader.PropertyToID("_GHighlights");
+        static readonly int IdGShadows    = Shader.PropertyToID("_GShadows");
+        static readonly int IdGSaturation = Shader.PropertyToID("_GSaturation");
+        static readonly int IdGHueShift   = Shader.PropertyToID("_GHueShift");
+        static readonly int IdGTint       = Shader.PropertyToID("_GTint");
+        static readonly int IdGOverlay    = Shader.PropertyToID("_GOverlay");
 
         #endregion
 
@@ -143,6 +178,9 @@ namespace Love.Video
         const int PassDetail = 3;
         const int PassComposite = 4;
         const int PassGeometry = 5;
+        const int PassMaskBuild = 6;
+        const int PassMaskApply = 7;
+        const int PassFinish = 8;
 
         /// <summary>把 src 过一遍完整的调色管线，结果写进 dst。</summary>
         public void Render(Texture src, RenderTexture dst, VideoGradeSettings settings, Options options)
@@ -207,13 +245,124 @@ namespace Love.Video
             _material.SetTexture(IdBloomTex, bloom != null ? (Texture)bloom : Texture2D.blackTexture);
             _material.SetTexture(IdBlurTex,  blur  != null ? (Texture)blur  : stageSrc);
 
-            Graphics.Blit(stageSrc, dst, _material, PassComposite);
+            // 合成 -> 蒙版组 -> 收尾。风格化被挪进收尾 Pass，
+            // 就是为了让蒙版组的调整排在暗角、颗粒之前
+            var ping = GetTemp(src.width, src.height);
+            Graphics.Blit(stageSrc, ping, _material, PassComposite);
+
+            if (settings.ActiveMaskGroups > 0)
+                ping = RunMaskGroups(ping, settings, options);
+
+            // 分屏对比要的是几何变换之后、调色之前的画面。
+            // 用 stageSrc 的话降噪、通透度这些会同时出现在"原图"那一侧，比不出东西来
+            _material.SetTexture(IdRawTex, src);
+            Graphics.Blit(ping, dst, _material, PassFinish);
+            RenderTexture.ReleaseTemporary(ping);
 
             if (bloom  != null) RenderTexture.ReleaseTemporary(bloom);
             if (blur   != null) RenderTexture.ReleaseTemporary(blur);
             if (detail != null) RenderTexture.ReleaseTemporary(detail);
             if (geo    != null) RenderTexture.ReleaseTemporary(geo);
         }
+
+        /// <summary>
+        /// 跑一遍所有启用的蒙版组，返回处理后的画面。
+        ///
+        /// 每组两步：先把它的部件按「加 / 减 / 交」乒乓累积成一张蒙版，
+        /// 再拿这张蒙版把这一组的调整混回画面。所以 N 个组 = N 趟蒙版构建 + N 趟应用。
+        /// 对图片无所谓，视频上组数多了要留意。
+        /// </summary>
+        RenderTexture RunMaskGroups(RenderTexture image, VideoGradeSettings s, Options o)
+        {
+            var pong = GetTemp(image.width, image.height);
+            // 蒙版是数据不是颜色，必须用 Linear：走 sRGB 的话写进去 0.5 读出来就不是 0.5 了
+            var maskA = GetTempLinear(image.width, image.height);
+            var maskB = GetTempLinear(image.width, image.height);
+
+            float aspect = image.height > 0 ? (float)image.width / image.height : 1.7778f;
+            _material.SetFloat(IdAspect, aspect);
+            _material.SetTexture(IdDepthTex, o.depthMap != null ? o.depthMap : Texture2D.blackTexture);
+
+            foreach (var g in s.maskGroups)
+            {
+                if (g == null || !g.enabled || g.parts.Count == 0 || !g.HasEffect) continue;
+
+                Texture prev = Texture2D.blackTexture;
+                var cur = maskA;
+
+                for (int i = 0; i < g.parts.Count; i++)
+                {
+                    // 第一个部件恒按「加」处理：从全黑起步，减和交都无从谈起
+                    ApplyPartUniforms(g.parts[i], i == 0, o);
+                    _material.SetTexture(IdPrevMask, prev);
+                    Graphics.Blit(image, cur, _material, PassMaskBuild);
+
+                    prev = cur;
+                    cur = ReferenceEquals(cur, maskA) ? maskB : maskA;
+                }
+
+                ApplyGroupUniforms(g);
+                _material.SetTexture(IdGroupMask, prev);
+                Graphics.Blit(image, pong, _material, PassMaskApply);
+
+                var swap = image; image = pong; pong = swap;
+            }
+
+            RenderTexture.ReleaseTemporary(pong);
+            RenderTexture.ReleaseTemporary(maskA);
+            RenderTexture.ReleaseTemporary(maskB);
+            return image;
+        }
+
+        void ApplyPartUniforms(MaskPart p, bool forceAdd, Options o)
+        {
+            _material.SetFloat(IdPartShape, p.shape);
+            _material.SetFloat(IdPartOp, forceAdd ? 0f : p.op);
+            _material.SetFloat(IdPartInvert, p.invert ? 1f : 0f);
+            _material.SetFloat(IdPartOpacity, Mathf.Clamp01(p.opacity));
+
+            _material.SetVector(IdPartCenter, p.center);
+            _material.SetVector(IdPartSize, new Vector4(Mathf.Max(p.size.x, 0.001f),
+                                                        Mathf.Max(p.size.y, 0.001f), 0f, 0f));
+            float rad = p.rotation * Mathf.Deg2Rad;
+            _material.SetVector(IdPartRot, new Vector4(Mathf.Cos(rad), Mathf.Sin(rad), 0f, 0f));
+            _material.SetFloat(IdPartFeather, Mathf.Clamp(p.feather, 0.001f, 1f));
+
+            _material.SetVector(IdPartHue, new Vector4(p.hueCenter, p.hueRange, p.hueSoft, 0f));
+            _material.SetVector(IdPartSat, new Vector4(p.satMin, p.satMax, p.satSoft, 0f));
+            _material.SetVector(IdPartLum, new Vector4(p.lumMin, p.lumMax, p.lumSoft, 0f));
+            _material.SetVector(IdPartDepth, new Vector4(p.depthMin, p.depthMax, p.depthSoft, 0f));
+
+            _material.SetTexture(IdPartTex, ResolvePartTexture(p, o));
+        }
+
+        /// <summary>贴图类部件的来源。取不到时给纯黑——宁可这个部件不选中任何东西，也别乱选一片。</summary>
+        static Texture ResolvePartTexture(MaskPart p, Options o)
+        {
+            if (p.Shape == MaskShape.Subject)
+                return o.externalMask != null ? o.externalMask : Texture2D.blackTexture;
+
+            if (p.Shape == MaskShape.Brush && o.brushes != null &&
+                p.brushId >= 0 && p.brushId < o.brushes.Count && o.brushes[p.brushId] != null)
+                return o.brushes[p.brushId];
+
+            return Texture2D.blackTexture;
+        }
+
+        void ApplyGroupUniforms(MaskGroup g)
+        {
+            _material.SetFloat(IdGExposure, g.exposure);
+            _material.SetFloat(IdGContrast, g.contrast);
+            _material.SetFloat(IdGHighlights, g.highlights);
+            _material.SetFloat(IdGShadows, g.shadows);
+            _material.SetFloat(IdGSaturation, g.saturation);
+            _material.SetFloat(IdGHueShift, g.hueShift);
+            _material.SetVector(IdGTint, g.TintRGB());
+            _material.SetFloat(IdGOverlay, g.showOverlay ? 1f : 0f);
+        }
+
+        static RenderTexture GetTempLinear(int w, int h) =>
+            RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 
         /// <summary>
         /// 逐级降采样再逐级帐篷升采样，得到一张柔和的模糊图。

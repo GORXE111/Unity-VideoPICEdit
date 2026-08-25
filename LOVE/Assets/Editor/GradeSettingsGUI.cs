@@ -34,6 +34,7 @@ namespace Love.EditorTools
             ("curve",     "曲线",                                false, "曲线 主曲线 rgb curve"),
             ("hsl",       "HSL 八色带混合器",                     false, "hsl 八色带 混合器 红 橙 黄 绿 青 蓝 紫 品红 明亮度 饱和度"),
             ("sixcurve",  "六条曲线",                            false, "六条曲线 色相 饱和 亮度 vs"),
+            ("masks",     "蒙版（局部调整）",                     true,  "蒙版 局部 选区 渐变 径向 矩形 画笔 颜色范围 亮度范围 深度 主体 mask"),
             ("secondary", "二级校色（Power Window / HSL 限定器）", false, "二级 power window 限定器 遮罩 窗口 渐变 椭圆 矩形"),
             ("aimask",    "AI 蒙版用法",                         false, "ai 蒙版 主体 背景虚化 景深 反选 边缘 收缩 扩张"),
             ("effect",    "效果",                                true,  "效果 辉光 bloom 模糊 畸变 暗角 颗粒 色差 抖动 斑马纹 镜头"),
@@ -41,6 +42,22 @@ namespace Love.EditorTools
 
         string _filter = "";
         bool Filtering => !string.IsNullOrEmpty(_filter);
+
+        /// <summary>蒙版列表。窗口要往里塞「有没有主体蒙版 / 深度图」，也要读「正在涂哪个笔刷」。</summary>
+        public MaskListGUI Masks { get; } = new MaskListGUI();
+
+        void DrawMasks(VideoGradeSettings s)
+        {
+            // 老预设里只有单块二级校色，读进来自动迁一份到列表里
+            s.MigrateSecondary();
+
+            Masks.SourceSize = SourceSize;
+            Masks.Draw(s, RecordUndo, () => _externalChange = true);
+
+            if (s.ActiveMaskGroups > 1)
+                EditorGUILayout.HelpBox($"{s.ActiveMaskGroups} 组生效中。每组要多跑两趟全分辨率的 Pass，" +
+                                        "图片无所谓，视频上组数多了会拖慢预览。", MessageType.None);
+        }
 
         string _newPresetName = "";
         List<string> _presetCache;
@@ -182,6 +199,8 @@ namespace Love.EditorTools
                     }
                 }
             }
+
+            if (Group("masks")) DrawMasks(s);
 
             if (Group("secondary")) DrawSecondary(s);
 

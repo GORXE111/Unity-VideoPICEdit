@@ -106,7 +106,9 @@ StoryDirector（总导演，协程状态机）
 VideoGradeSettings   纯数据（JsonUtility 可序列化，含 AnimationCurve），带 Lerp
 VideoGradeRenderer   渲染核心，普通 C# 类 —— 不依赖 MonoBehaviour / 场景 / Play 模式
 GradePresetStore     预设读写，编辑器和运行时共用
-VideoGrade.shader    6 个 Pass，算法在 4 个 .cginc 里
+VideoGrade.shader    9 个 Pass，算法在 4 个 .cginc 里
+MaskBrush.shader     手绘笔刷，靠 BlendOp Max/Min 直接画进蒙版
+GradeMask            蒙版组与部件的数据（Lightroom 那套结构）
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
 SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
@@ -131,6 +133,11 @@ FfmpegTool           ffmpeg 定位与命令行拼装（解码、编码、单帧�
 定位策略是：顺着读 → 前跳 24 帧以内读掉扔掉 → 更远或往回才重开进程。
 
 参数界面 100+ 控件，由 `Editor/GradeSettingsGUI.cs` 一份实现供两个窗口共用。
+
+**蒙版组**：一个组 = 若干部件（加/减/交）+ 一组自己的调整。部件数量不定，
+在 shader 里展不开，所以一个部件跑一趟 Pass、在两张单通道图之间乒乓累积。
+**那两张图必须是 `ReadWrite.Linear`**——蒙版是数据不是颜色，走 sRGB 的话
+写进去 0.5 读出来就不是 0.5。N 个组 = 2N 趟全分辨率 Pass。
 
 **Pass 编排**（顺序有讲究）：
 
@@ -216,6 +223,10 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   （要求解码线程每帧和主线程同步）。改成在 `update` 里轮询 `player.frame`。
 - **别无条件 `Repaint()`**。渲染函数提前返回时脏标记清不掉，就变成每拍都重绘的空转，
   整个编辑器跟着发涩。只在真有变化时重绘。
+- **风格化必须排在蒙版之后**。暗角、颗粒这些作用于整幅成片，放在蒙版之前的话，
+  一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序。
+- **`IList<T>` 是不变的**。`List<RenderTexture>` 递不进 `IList<Texture>` 的参数，
+  笔刷那批贴图只能直接存成 `List<Texture>`。
 - **不要用 `Directory.GetFiles(..., AllDirectories)` 找可执行文件**。
   WinGet 的包目录实测有近 12000 个文件，递归一次 369ms，而这种查找往往被 `OnGUI` 间接调到。
 - **ARW2 解码里 `imax == imin` 会多读一个增量**，`bit` 走到 128、下标越过整块。

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Love.Video
@@ -172,6 +173,13 @@ namespace Love.Video
         /// <summary>把遮罩本身以灰度输出，调限定器和窗口时必须靠它看边界。</summary>
         public bool showMask = false;
 
+        // ---------- 蒙版组（Lightroom 那套）----------
+        // 上面那套二级校色只能有一块选区。这里是一张列表：压天空一组、提亮人脸一组、
+        // 单独调地面一组，每组自带一套调整参数，互不干扰。
+        //
+        // 两套并存：老的二级校色仍然生效，读取老预设时会自动迁一份过来（见 MigrateSecondary）。
+        public List<MaskGroup> maskGroups = new List<MaskGroup>();
+
         // ---------- AI 主体蒙版 ----------
         // 蒙版贴图本身不在这里（它是每张图各自的，不能塞进 JSON 预设），
         // 这里只放"拿到蒙版之后怎么用"的参数。
@@ -323,6 +331,11 @@ namespace Love.Video
             into.flipH = d.flipH;
             into.flipV = d.flipV;
             into.hslEnabled = d.hslEnabled;
+
+            // 蒙版组没法有意义地插值（部件数量都可能不同），过半程整体切换
+            into.maskGroups = new List<MaskGroup>();
+            if (d.maskGroups != null)
+                foreach (var g in d.maskGroups) if (g != null) into.maskGroups.Add(g.Clone());
         }
 
         static void LerpBands(float[] a, float[] b, float t, ref float[] into)
@@ -427,10 +440,100 @@ namespace Love.Video
 
             dehaze = o.dehaze;
 
+            maskGroups = new List<MaskGroup>();
+            if (o.maskGroups != null)
+                foreach (var g in o.maskGroups) if (g != null) maskGroups.Add(g.Clone());
+
             hslEnabled = o.hslEnabled;
             hslHue = CopyBands(o.hslHue);
             hslSat = CopyBands(o.hslSat);
             hslLum = CopyBands(o.hslLum);
+        }
+
+        /// <summary>
+        /// 把老的单块二级校色迁成一个蒙版组。
+        ///
+        /// 早先存下来的 grade.json 里只有 windowShape / qual* / sec* 那一套，
+        /// 读进来 maskGroups 是空的。这里补一份等价的过去，用户打开老预设时
+        /// 看到的还是原来的效果，只不过现在它变成列表里的第一项、可以再加更多组。
+        ///
+        /// 只在列表为空时迁，迁完把老开关关掉，免得同一块选区被叠加两遍。
+        /// </summary>
+        public void MigrateSecondary()
+        {
+            if (maskGroups == null) maskGroups = new List<MaskGroup>();
+            if (maskGroups.Count > 0 || !secondaryEnabled) return;
+
+            var g = new MaskGroup
+            {
+                name = "二级校色（迁移）",
+                exposure = secExposure,
+                contrast = secContrast,
+                saturation = secSaturation,
+                hueShift = secHueShift,
+                tintHue = secTintHue,
+                tintStrength = secTintStrength,
+            };
+
+            if (windowShape != 0)
+            {
+                g.parts.Add(new MaskPart
+                {
+                    shape = windowShape == 1 ? (int)MaskShape.Ellipse
+                          : windowShape == 2 ? (int)MaskShape.Rect
+                          : (int)MaskShape.LinearGradient,
+                    op = (int)MaskOp.Add,
+                    invert = windowInvert,
+                    center = windowCenter,
+                    size = windowSize,
+                    rotation = windowRotation,
+                    feather = windowFeather,
+                });
+            }
+
+            if (qualifierEnabled)
+            {
+                g.parts.Add(new MaskPart
+                {
+                    // 老的限定器同时管色相、饱和度和亮度，拆成两个部件求交才等价
+                    shape = (int)MaskShape.ColorRange,
+                    op = g.parts.Count == 0 ? (int)MaskOp.Add : (int)MaskOp.Intersect,
+                    hueCenter = qualHueCenter, hueRange = qualHueRange, hueSoft = qualHueSoft,
+                    satMin = qualSatMin, satMax = qualSatMax, satSoft = qualSatSoft,
+                });
+                g.parts.Add(new MaskPart
+                {
+                    shape = (int)MaskShape.LuminanceRange,
+                    op = g.parts.Count == 0 ? (int)MaskOp.Add : (int)MaskOp.Intersect,
+                    lumMin = qualLumMin, lumMax = qualLumMax, lumSoft = qualLumSoft,
+                });
+            }
+
+            if (secondaryUseMask)
+                g.parts.Add(new MaskPart
+                {
+                    shape = (int)MaskShape.Subject,
+                    op = g.parts.Count == 0 ? (int)MaskOp.Add : (int)MaskOp.Intersect,
+                    invert = maskInvert,
+                });
+
+            if (g.parts.Count == 0) return;
+
+            maskGroups.Add(g);
+            secondaryEnabled = false;
+        }
+
+        /// <summary>真正要跑的蒙版组数。空组和没改动的组不算。</summary>
+        public int ActiveMaskGroups
+        {
+            get
+            {
+                if (maskGroups == null) return 0;
+                int n = 0;
+                foreach (var g in maskGroups)
+                    if (g != null && g.enabled && g.parts.Count > 0 && g.HasEffect) n++;
+                return n;
+            }
         }
 
         public const int HslBandCount = 8;

@@ -5,8 +5,11 @@
 //   1 纯降采样（整体模糊用）
 //   2 帐篷升采样
 //   3 细节滤波：镜头畸变 + 双边降噪 + 通透度 + 纹理 + 智能锐化 —— 都关掉时 C# 端整趟跳过
-//   4 合成 + 调色：LOG 解码 / 校色矩阵 / 去朦胧 / 一级 / 曲线 / HSL / 六条曲线 / LUT / 二级 / 风格化 / 监看
+//   4 合成 + 调色：LOG 解码 / 校色矩阵 / 去朦胧 / 一级 / 曲线 / HSL / 六条曲线 / LUT / 二级
 //   5 几何：裁剪 / 拉直 / 90 度旋转 / 翻转 —— 跑在整条管线最前面
+//   6 蒙版构建：一个部件一趟，乒乓累积成一张单通道蒙版
+//   7 蒙版应用：把某个蒙版组的调整按蒙版混回画面
+//   8 收尾：暗角 / 颗粒 / 抖动 / 斑马纹 / 分屏 —— 排在蒙版之后，和 Camera Raw 一致
 //
 // 具体算法都在 .cginc 里（Common / Log / Color / Masks），这个文件只负责编排。
 // 关掉的功能靠 shader_feature 在编译期消失，而不是运行期每像素判一次分支。
@@ -205,23 +208,13 @@ Shader "Hidden/Love/VideoGrade"
             half  _BgBlur;           // 蒙版外的虚化强度
             half  _SecUseMask;
 
-            half  _VignetteIntensity;
-            half  _VignetteSmoothness;
-            half  _Grain;
-            half  _Dither;
             half  _Aspect;
-            half  _GrainSeed;
-
             half  _ShowMask;
-            half2 _Zebra;            // x=过曝阈值 y=欠曝阈值，任一 <=0 表示关
-            half  _SplitEnabled;
-            half  _SplitPos;
 
             half4 frag (v2f i) : SV_Target
             {
                 float2 uv = i.uv;
 
-                // 分屏对比要用的原图，必须是完全未经处理的采样
                 half3 rawSource = tex2D(_MainTex, uv).rgb;
 
                 // 色差：按到中心的距离把 R/B 通道往两边推。
@@ -306,59 +299,9 @@ Shader "Hidden/Love/VideoGrade"
                 }
                 #endif
 
-                // 暗角
-                if (_VignetteIntensity > 0.001h)
-                {
-                    float2 d = uv - 0.5;
-                    d.x *= _Aspect;
-                    half dist = saturate(length(d) * 1.4142h);
-                    half vig = pow(saturate(1.0h - dist), _VignetteSmoothness * 4.0h + 0.4h);
-                    g *= lerp(1.0h, vig, _VignetteIntensity);
-                }
-
-                // 胶片颗粒：暗部更明显，和真实胶片一致
-                if (_Grain > 0.001h)
-                {
-                    float2 p = uv * _MainTex_TexelSize.zw + _GrainSeed;
-                    half n = frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-                    g += (n - 0.5h) * _Grain * (1.0h - Luma(g) * 0.6h);
-                }
-
-                // 抖动：给渐变加一点噪声，消除 8bit 输出的色带
-                if (_Dither > 0.001h)
-                {
-                    float2 p = uv * _MainTex_TexelSize.zw + _GrainSeed * 1.7;
-                    half n = frac(sin(dot(p, float2(21.7381, 53.1297))) * 27183.1927);
-                    g += (n - 0.5h) * _Dither * (2.0h / 255.0h);
-                }
-
-                // 斑马纹：过曝画红斜纹、欠曝画蓝斜纹，斜纹是监看惯例，
-                // 用纯色块会和画面本身的高光分不清
-                if (_Zebra.x > 0.001h || _Zebra.y > 0.001h)
-                {
-                    half lum = Luma(saturate(g));
-                    half stripe = frac((uv.x * _MainTex_TexelSize.z + uv.y * _MainTex_TexelSize.w) * 0.12h);
-                    if (stripe < 0.5h)
-                    {
-                        if (_Zebra.x > 0.001h && lum > _Zebra.x) g = half3(1.0h, 0.15h, 0.15h);
-                        else if (_Zebra.y > 0.001h && lum < _Zebra.y) g = half3(0.15h, 0.35h, 1.0h);
-                    }
-                }
-
-                g = max(g, 0);
-
-                // 写回时 Unity 会做 sRGB 编码，所以这里要还原成线性
-                half3 result = GammaToLinearSpace(g);
-
-                // 分屏对比：左边原图，右边调色后，中间一条白线
-                if (_SplitEnabled > 0.5h)
-                {
-                    result = uv.x < _SplitPos ? rawSource : result;
-                    half pixelDist = abs(uv.x - _SplitPos) * _MainTex_TexelSize.z;
-                    result = lerp(result, half3(1, 1, 1), saturate(1.5h - pixelDist));
-                }
-
-                return half4(result, 1);
+                // 风格化和分屏挪到收尾 Pass 了：蒙版组的调整必须排在暗角、颗粒之前，
+                // 否则一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序
+                return half4(GammaToLinearSpace(g), 1);
             }
             ENDCG
         }
@@ -405,6 +348,181 @@ Shader "Hidden/Love/VideoGrade"
                 // 不能靠 clamp 采样——那会把边缘像素拉成一条条色带
                 float2 inside = step(0.0, uv) * step(uv, 1.0);
                 return tex2D(_MainTex, saturate(uv)) * (inside.x * inside.y);
+            }
+            ENDCG
+        }
+
+        // ---------------- Pass 6：蒙版构建 ----------------
+        // 一个部件跑一趟，结果和上一趟的累积值按「加 / 减 / 交」合并。
+        // 部件数量不定，只能这样乒乓，没法在 shader 里展开
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex VertFullscreen
+            #pragma fragment frag
+            #pragma target 3.0
+            #include "VideoGradeCommon.cginc"
+            #include "VideoGradeMasks.cginc"
+
+            half _Aspect;
+
+            half4 frag (v2f i) : SV_Target
+            {
+                // 颜色和亮度范围要在 gamma 空间判断，才和用户在直方图上看到的对得上
+                half3 g = LinearToGammaSpace(tex2D(_MainTex, i.uv).rgb);
+
+                half m = saturate(EvalPart(i.uv, g, _Aspect));
+                if (_PartInvert > 0.5h) m = 1.0h - m;
+                m *= _PartOpacity;
+
+                half prev = tex2Dlod(_PrevMask, float4(i.uv, 0, 0)).r;
+                half o = saturate(CombineMask(prev, saturate(m)));
+                return half4(o, o, o, 1);
+            }
+            ENDCG
+        }
+
+        // ---------------- Pass 7：蒙版应用 ----------------
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex VertFullscreen
+            #pragma fragment frag
+            #pragma target 3.0
+            #include "VideoGradeCommon.cginc"
+
+            sampler2D _GroupMask;
+
+            half  _GExposure;
+            half  _GContrast;
+            half  _GHighlights;
+            half  _GShadows;
+            half  _GSaturation;
+            half  _GHueShift;
+            half3 _GTint;
+            half  _GOverlay;
+
+            half4 frag (v2f i) : SV_Target
+            {
+                half3 g = LinearToGammaSpace(tex2D(_MainTex, i.uv).rgb);
+                half m = saturate(tex2D(_GroupMask, i.uv).r);
+
+                // 调蒙版时必须能看见选区边界，靠猜是调不出来的
+                if (_GOverlay > 0.5h)
+                {
+                    g = lerp(g, half3(1.0h, 0.25h, 0.2h), m * 0.55h);
+                    return half4(GammaToLinearSpace(g), 1);
+                }
+
+                half3 a = g * exp2(_GExposure);
+                a = (a - 0.5h) * _GContrast + 0.5h;
+                a = max(a, 0);
+
+                half lum = Luma(a);
+                a *= 1.0h + _GShadows    * (1.0h - smoothstep(0.0h, 0.5h, lum))
+                          + _GHighlights * smoothstep(0.5h, 1.0h, lum);
+                a = max(a, 0);
+
+                half l2 = Luma(a);
+                a = lerp(half3(l2, l2, l2), a, _GSaturation);
+                a = max(a, 0) * _GTint;
+
+                if (abs(_GHueShift) > 0.001h)
+                {
+                    half3 hsv = RgbToHsv(saturate(a));
+                    hsv.x = frac(hsv.x + _GHueShift + 1.0h);
+                    a = HsvToRgb(hsv);
+                }
+
+                g = lerp(g, max(a, 0), m);
+                return half4(GammaToLinearSpace(g), 1);
+            }
+            ENDCG
+        }
+
+        // ---------------- Pass 8：收尾 ----------------
+        // 暗角 / 颗粒 / 抖动 / 斑马纹 / 分屏。排在蒙版之后：
+        // 这些是"作用于整幅成片"的东西，不该被局部调整反过来影响
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex VertFullscreen
+            #pragma fragment frag
+            #pragma target 3.0
+            #include "VideoGradeCommon.cginc"
+
+            sampler2D _RawTex;      // 分屏要的原图，必须是完全未经处理的
+
+            half  _VignetteIntensity;
+            half  _VignetteSmoothness;
+            half  _Grain;
+            half  _Dither;
+            half  _Aspect;
+            half  _GrainSeed;
+            half2 _Zebra;
+            half  _SplitEnabled;
+            half  _SplitPos;
+
+            half4 frag (v2f i) : SV_Target
+            {
+                float2 uv = i.uv;
+                half3 g = LinearToGammaSpace(tex2D(_MainTex, uv).rgb);
+
+                // 暗角
+                if (_VignetteIntensity > 0.001h)
+                {
+                    float2 d = uv - 0.5;
+                    d.x *= _Aspect;
+                    half dist = saturate(length(d) * 1.4142h);
+                    half vig = pow(saturate(1.0h - dist), _VignetteSmoothness * 4.0h + 0.4h);
+                    g *= lerp(1.0h, vig, _VignetteIntensity);
+                }
+
+                // 胶片颗粒：暗部更明显，和真实胶片一致
+                if (_Grain > 0.001h)
+                {
+                    float2 p = uv * _MainTex_TexelSize.zw + _GrainSeed;
+                    half n = frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+                    g += (n - 0.5h) * _Grain * (1.0h - Luma(g) * 0.6h);
+                }
+
+                // 抖动：给渐变加一点噪声，消除 8bit 输出的色带
+                if (_Dither > 0.001h)
+                {
+                    float2 p = uv * _MainTex_TexelSize.zw + _GrainSeed * 1.7;
+                    half n = frac(sin(dot(p, float2(21.7381, 53.1297))) * 27183.1927);
+                    g += (n - 0.5h) * _Dither * (2.0h / 255.0h);
+                }
+
+                // 斑马纹：过曝画红斜纹、欠曝画蓝斜纹，斜纹是监看惯例，
+                // 用纯色块会和画面本身的高光分不清
+                if (_Zebra.x > 0.001h || _Zebra.y > 0.001h)
+                {
+                    half lum = Luma(saturate(g));
+                    half stripe = frac((uv.x * _MainTex_TexelSize.z + uv.y * _MainTex_TexelSize.w) * 0.12h);
+                    if (stripe < 0.5h)
+                    {
+                        if (_Zebra.x > 0.001h && lum > _Zebra.x) g = half3(1.0h, 0.15h, 0.15h);
+                        else if (_Zebra.y > 0.001h && lum < _Zebra.y) g = half3(0.15h, 0.35h, 1.0h);
+                    }
+                }
+
+                g = max(g, 0);
+
+                // 写回时 Unity 会做 sRGB 编码，所以这里要还原成线性
+                half3 result = GammaToLinearSpace(g);
+
+                // 分屏对比：左边原图，右边调色后，中间一条白线。
+                // 采样放在分支外——分支内 tex2D 的隐式梯度是未定义的
+                half3 raw = tex2D(_RawTex, uv).rgb;
+                if (_SplitEnabled > 0.5h)
+                {
+                    result = uv.x < _SplitPos ? raw : result;
+                    half pixelDist = abs(uv.x - _SplitPos) * _MainTex_TexelSize.z;
+                    result = lerp(result, half3(1, 1, 1), saturate(1.5h - pixelDist));
+                }
+
+                return half4(result, 1);
             }
             ENDCG
         }
