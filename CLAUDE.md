@@ -56,6 +56,24 @@ dotnet "C:\Program Files\Unity 2022.3.62f3\Editor\Data\DotNetSdkRoslyn\csc.dll" 
 - 装了新包之后 rsp 里的路径会失效（包缓存重排），重新从 Bee 产物生成一份。
 - 要编到 `#if LOVE_SENTIS` 里的代码，rsp 得带 `-define:LOVE_SENTIS`。
 
+### 离线测试
+
+`Tools/offline-tests/` 用一份最小的 UnityEngine 桩，把 `Assets/` 里的**真实源文件**
+编成控制台程序跑。引用的是源文件不是拷贝，所以测的永远是要发布的那份代码。
+
+```bash
+cd Tools/offline-tests && dotnet build
+dotnet bin/Debug/net8.0/offlinetests.dll --library    # 图片库逻辑
+python diff_repair.py                                 # 修复找源，和参考实现比
+python test_autotone.py                               # 自适应起手值，量处理前后
+```
+
+**桩里每个方法的语义必须和 Unity 一致**，否则验的就不是真实行为。
+比如 `Mathf.RoundToInt` 走的是银行家舍入。
+
+能从窗口里分出来的纯逻辑就分出来（`PhotoLibrary`、`ImageRepair` 的找源、`AutoTone`、
+`SonyRawImporter`）——GUI 那半没法自动验，分出来的部分就该验到位。
+
 ### HLSL 也能离线编译
 
 ```bash
@@ -243,6 +261,12 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   整个编辑器跟着发涩。只在真有变化时重绘。
 - **风格化必须排在蒙版之后**。暗角、颗粒这些作用于整幅成片，放在蒙版之前的话，
   一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序。
+- **自动算参数时，管线上互相影响的两步要一起解**。`AutoTone` 里曝光排在色阶前面，
+  但色阶的拉伸会把中位数再推一次，分开算的结果是"一张本来正常的照片被推到过亮"。
+  迭代几轮反解即可。
+- **验证的判据本身也可能是错的**。`AutoTone` 一开始拿"中位数靠近中级灰"当唯一判据，
+  卡掉了一个正确的结果——一张只是发灰的片子，正确处理是抬黑位加反差，中位数反而往下走。
+  出图看一眼比多调几轮阈值管用。
 - **能从窗口里分出来的纯逻辑就分出来**。`PhotoLibrary`（排序/筛选/多选）和
   `ImageRepair`（找取样源）都没有 GUI 依赖，所以能用 `rawtest` 那套桩离线跑测试。
   GUI 那半没法自动验，分出来的部分就该验到位。

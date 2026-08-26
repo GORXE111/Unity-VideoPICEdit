@@ -66,6 +66,7 @@ namespace Love.EditorTools
         readonly Dictionary<string, VideoGradeSettings> _settingsByPath =
             new Dictionary<string, VideoGradeSettings>();
         VideoGradeSettings _clipboard;
+        [SerializeField] AutoTone.Options _autoOpt = AutoTone.Options.Default;
         string _loadedPath;
         readonly List<string> _pendingImports = new List<string>();
         int _pendingSelect = -1;
@@ -490,6 +491,8 @@ namespace Love.EditorTools
             DrawMaskBar();
             EditorGUILayout.Space(8f);
             DrawSyncBar();
+            EditorGUILayout.Space(8f);
+            DrawAutoToneBar();
             EditorGUILayout.Space(8f);
             DrawRepairBar();
             EditorGUILayout.Space(8f);
@@ -2030,40 +2033,104 @@ namespace Love.EditorTools
         }
 
         /// <summary>
-        /// 排队到 Update 里跑，因为里面有 Blit 和回读——这两样绝不能出现在 OnGUI 里。
+        /// 分析用的像素。直接拿缩略图，不重新回读原图。
         ///
-        /// 统计走缩略图而不是原图：6100 万像素的 GetPixels 会分配将近 1GB 的 Color[]，
-        /// 而判断曝光和两端分位数根本不需要那个精度。
+        /// 缩略图是 128 像素，一张 6000 像素的照片相当于每个缩略图像素平均了两千多个源像素。
+        /// 分位数在一万六千个样本上已经很稳，而<b>孤立的镜面高光会被平均掉</b>——
+        /// 这恰恰是想要的：几个反光点不该触发高光回收，大片过曝的天空才该。
+        ///
+        /// 好处是批量自动色调不用把每张原图读一遍，几百张也是瞬时的。
         /// </summary>
+        static Color[] AnalysisPixels(PhotoEntry e) =>
+            e != null && e.thumb != null ? e.thumb.GetPixels() : null;
+
+        /// <summary>排队到 Update 里跑：Undo 和重渲染都要在 GUI 之外做。</summary>
         void AutoToneCurrent()
         {
-            if (_full == null) return;
+            var px = AnalysisPixels(_lib.Current);
+            if (px == null) return;
 
-            const int N = 512;
-            var rt = RenderTexture.GetTemporary(N, N, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
-            var small = new Texture2D(N, N, TextureFormat.RGBA32, false, false)
-            { hideFlags = HideFlags.HideAndDontSave };
+            Undo.RecordObject(this, "自动色调");
+            AutoTone.Apply(AutoTone.Analyze(px), _settings, _autoOpt);
+            StashSettings();
+            _dirty = true;
+            Repaint();
+        }
+
+        /// <summary>
+        /// 对选中的每一张各自算一套。注意不是"把当前这张的参数抄过去"——
+        /// 那是同步；自动色调是让每张<b>按自己的分布</b>各站各的。
+        /// </summary>
+        void AutoToneSelection()
+        {
+            var list = new List<PhotoEntry>(_lib.Selected.Count > 1 ? _lib.Selected
+                                                                    : (IEnumerable<PhotoEntry>)_lib.Visible);
+            if (list.Count == 0) return;
+
+            StashSettings();
+            int done = 0;
 
             try
             {
-                Graphics.Blit(_full, rt);
-                var prev = RenderTexture.active;
-                RenderTexture.active = rt;
-                small.ReadPixels(new Rect(0f, 0f, N, N), 0, 0, false);
-                small.Apply(false, false);
-                RenderTexture.active = prev;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var e = list[i];
+                    if (list.Count > 8 && EditorUtility.DisplayCancelableProgressBar(
+                            "自动色调", e.name, (float)i / list.Count)) break;
 
-                Undo.RecordObject(this, "自动色调");
-                AutoTone.Apply(small.GetPixels(), _settings);
-                _dirty = true;
-            }
-            finally
-            {
-                RenderTexture.ReleaseTemporary(rt);
-                DestroyImmediate(small);
-            }
+                    var px = AnalysisPixels(e);
+                    if (px == null) continue;
 
+                    // 在这张自己已有的参数上改，风格化那些不动
+                    if (!_settingsByPath.TryGetValue(e.path, out var st))
+                    {
+                        st = _settings.Clone();
+                        _settingsByPath[e.path] = st;
+                    }
+                    AutoTone.Apply(AutoTone.Analyze(px), st, _autoOpt);
+                    done++;
+                }
+            }
+            finally { EditorUtility.ClearProgressBar(); }
+
+            // 当前这张的参数要同步回界面上那一套，否则滑条还是旧值
+            if (_lib.Current != null && _settingsByPath.TryGetValue(_lib.Current.path, out var cur))
+                _settings.CopyFrom(cur);
+
+            Debug.Log($"[修图台] 自动色调已应用到 {done} 张");
+            _dirty = true;
             Repaint();
+        }
+
+        void DrawAutoToneBar()
+        {
+            EditorGUILayout.LabelField("自适应起手值", EditorStyles.boldLabel);
+
+            EditorGUI.BeginChangeCheck();
+            _autoOpt.exposure = EditorGUILayout.Toggle(
+                new GUIContent("曝光", "把中位亮度推到中级灰。和色阶一起解——色阶的拉伸会把中位数再推一次"),
+                _autoOpt.exposure);
+            _autoOpt.levels = EditorGUILayout.Toggle(
+                new GUIContent("色阶", "按 0.2% / 99.8% 分位数定黑白位"), _autoOpt.levels);
+            _autoOpt.highlightsShadows = EditorGUILayout.Toggle(
+                new GUIContent("高光 / 阴影", "只在两端真的挤住了才动"), _autoOpt.highlightsShadows);
+            _autoOpt.contrast = EditorGUILayout.Toggle(
+                new GUIContent("对比度", "拉完色阶之后中间还挤，说明是平片，加反差"), _autoOpt.contrast);
+            _autoOpt.whiteBalance = EditorGUILayout.Toggle(
+                new GUIContent("白平衡", "把高光区的平均色中性化，打七折。日落烛光这类片子建议关掉"),
+                _autoOpt.whiteBalance);
+            if (EditorGUI.EndChangeCheck()) Repaint();
+
+            using (new EditorGUI.DisabledScope(_lib.Current == null))
+                if (GUILayout.Button("对当前这张")) _pendingAction = AutoToneCurrent;
+
+            int n = _lib.Selected.Count > 1 ? _lib.Selected.Count : _lib.Visible.Count;
+            using (new EditorGUI.DisabledScope(n == 0))
+                if (GUILayout.Button($"对{(_lib.Selected.Count > 1 ? "选中的" : "当前筛选下的")} {n} 张"))
+                    _pendingAction = AutoToneSelection;
+
+            EditorGUILayout.HelpBox("每张按自己的分布各算一套，不是把当前这张的参数抄过去——那是上面的同步。",
+                                    MessageType.None);
         }
 
         #endregion

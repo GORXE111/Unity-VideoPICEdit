@@ -1,0 +1,9 @@
+bin/
+obj/
+probe.raw
+probe_meta.txt
+probe_spots.txt
+arw2_in.bin
+arw2_out.bin
+arw2_meta.txt
+out.ppm
