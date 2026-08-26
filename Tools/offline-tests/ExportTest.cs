@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Love.EditorTools;
+using Love.Tools;
 
 // 导出的命名 / 尺寸 / 重名逻辑。
 // 这类东西最容易出"看着对、批量跑一遍才发现全叠在一个文件上"的问题，

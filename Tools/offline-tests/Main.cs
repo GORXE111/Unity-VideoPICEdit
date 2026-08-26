@@ -1,6 +1,6 @@
 using System;
 using System.IO;
-using Love.EditorTools;
+using Love.Tools;
 
 class Program
 {

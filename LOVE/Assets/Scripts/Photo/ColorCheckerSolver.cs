@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// 24 色卡校色矩阵求解。

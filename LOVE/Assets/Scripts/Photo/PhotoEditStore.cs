@@ -4,7 +4,7 @@ using System.IO;
 using Love.Video;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>一份存档。存的是整套参数，恢复就是原样盖回去。</summary>
     [Serializable]
@@ -218,7 +218,7 @@ namespace Love.EditorTools
 
         static double EditorTime() =>
 #if UNITY_EDITOR
-            UnityEditor.EditorApplication.timeSinceStartup;
+            AppHost.TimeSinceStartup();
 #else
             0.0;
 #endif

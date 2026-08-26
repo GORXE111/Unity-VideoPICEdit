@@ -5,7 +5,7 @@ using System.IO;
 using System.Text;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// 一套导出配置。

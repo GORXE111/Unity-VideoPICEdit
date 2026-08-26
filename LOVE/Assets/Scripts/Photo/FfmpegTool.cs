@@ -1,10 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using UnityEditor;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// ffmpeg 的定位与命令行拼装。
@@ -23,8 +22,8 @@ namespace Love.EditorTools
         /// <summary>手动指定的路径。留空表示自动探测。</summary>
         public static string OverridePath
         {
-            get => EditorPrefs.GetString(PrefPath, "");
-            set { EditorPrefs.SetString(PrefPath, value ?? ""); _searched = false; _cached = null; }
+            get => AppHost.GetPref(PrefPath, "");
+            set { AppHost.SetPref(PrefPath, value ?? ""); _searched = false; _cached = null; }
         }
 
         public static string Path

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Love.EditorTools;
+using Love.Tools;
 using Love.Video;
 
 // 快照的淘汰规则。规则错了表现是"我存的那份不见了"，

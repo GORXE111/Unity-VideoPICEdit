@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>胶片条里的一项。只常驻缩略图，原图按需加载。</summary>
     public class PhotoEntry

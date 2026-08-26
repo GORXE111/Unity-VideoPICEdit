@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Reflection;
-using Love.EditorTools;
+using Love.Tools;
 
 // ARW2 差分测试。用反射调私有方法，免得为了测试往生产代码里开口子。
 static class Arw2Test

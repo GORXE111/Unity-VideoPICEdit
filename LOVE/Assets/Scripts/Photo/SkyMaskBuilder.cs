@@ -1,7 +1,7 @@
 using Love.Video;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// 把 <see cref="SkyDetect"/> 算出来的天空蒙版做成一张贴图，交给渲染管线。

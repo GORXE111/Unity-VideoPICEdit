@@ -56,6 +56,24 @@ dotnet "C:\Program Files\Unity 2022.3.62f3\Editor\Data\DotNetSdkRoslyn\csc.dll" 
 - 装了新包之后 rsp 里的路径会失效（包缓存重排），重新从 Bee 产物生成一份。
 - 要编到 `#if LOVE_SENTIS` 里的代码，rsp 得带 `-define:LOVE_SENTIS`。
 
+### 运行时/编辑器边界
+
+`Assets/Editor/` 里的代码**不进包**，`Assets/Scripts/` 里的进包。
+独立修图程序（`Tools/修图程序/打包 Windows`）要用的都在后者。
+
+```bash
+python Tools/checkruntime.py     # 按出包条件编一遍运行时代码
+```
+
+**Unity 在编辑器里编 `Assembly-CSharp` 是带 UnityEditor 引用的**，
+所以运行时代码碰了编辑器 API 在编辑器里发现不了。这个脚本摘掉那些引用和
+`UNITY_EDITOR` 宏再编一遍。文本检查抓"光引了命名空间"，编译抓"真调了 API"，
+两道合起来才盖全——只靠编译的话，没被用到的 `using UnityEditor;` 会漏过去
+（包的编辑器程序集在 `UnityEditor.*` 下声明了类型，命名空间是存在的）。
+
+编辑器专有的能力走 `Love.Tools.AppHost` 的委托注入，不要用 `#if UNITY_EDITOR`——
+条件编译等于把边界交给宏去守，委托注入让编译器自己守。
+
 ### 离线测试
 
 `Tools/offline-tests/` 用一份最小的 UnityEngine 桩，把 `Assets/` 里的**真实源文件**
@@ -323,6 +341,16 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   "小图比大图还慢"这种反直觉结论，进而选错模型。
 - **噪声估计要分块取低分位，不能整幅取均值**。草丛砖墙的二阶差分和噪声一样大，
   整幅平均会把纹理当噪声，强度拉满、细节全平。
+- **`Assets/Editor/` 里的代码不进包**。想让某段逻辑能出包，它必须在
+  `Assets/Scripts/` 下，而且完全不碰 `UnityEditor`。
+- **不看子进程退出码的检查是假的**。编译器没跑起来时也没有 `error CS` 行，
+  只 grep 输出的话报出来是"通过"——一个永远绿的检查比没有检查更糟。
+- **`using UnityEditor;` 光有 using 编得过**。包的编辑器程序集在 `UnityEditor.*`
+  下声明了类型，命名空间存在。所以查边界不能只靠编译，还得查文本。
+- **Win32 文件对话框必须带 `OFN_NOCHANGEDIR`**。不带的话它会改掉进程的当前目录，
+  之后所有相对路径都指到别处，而且不报错。
+- **IMGUI 出包之后能用**，`EditorGUILayout` 不能。`GUI` / `GUILayout` / `Event` /
+  `GUIStyle` 都在 UnityEngine 里，所以编辑器界面的结构能沿用，只要换控件那一层。
 - **渐变插值的起点要先快照**。直接拿被写入的对象当插值基准，每帧基准都在动，
   结果是一条越来越慢、永远到不了终点的曲线。
 

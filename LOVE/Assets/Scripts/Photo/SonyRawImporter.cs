@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// 索尼 ARW 解码。只做索尼一家、只做拜耳传感器，不追求通用 RAW 支持——

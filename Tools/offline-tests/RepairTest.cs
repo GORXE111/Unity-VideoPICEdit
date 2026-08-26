@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Reflection;
-using Love.EditorTools;
+using Love.Tools;
 using UnityEngine;
 
 // 找源算法的差分测试。

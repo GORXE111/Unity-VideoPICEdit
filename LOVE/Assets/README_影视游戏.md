@@ -745,6 +745,95 @@ RGB 和轮盘位置之间是**可逆投影**（R 在 0°、G 在 120°、B 在 2
 
 CPU 上一块 576² 要 7.4 秒，247 块就是半小时——**必须用 GPUCompute 后端**。
 
+### 独立程序
+
+`Tools/修图程序/打包 Windows`，输出在 `Build/PhotoApp/修图台.exe`。
+场景一样是代码生成的（`PhotoAppBuild.SetupScene`），手改改完下次重建就没了。
+
+#### 拦路的不是渲染，是代码放在哪儿
+
+调色管线本来就没绑在编辑器上——`VideoGradeRenderer` 是个普通 C# 类。
+真正的拦路石是两条：
+
+| 拦路 | 处置 |
+|---|---|
+| **`Assets/Editor/` 里的代码不进包** | 能跑在运行时的都搬到 `Assets/Scripts/Photo/` 了 |
+| 界面那半用的是 `EditorGUILayout` | 先做了一份最小的运行时界面 |
+
+搬过去的 12 个文件（命名空间也从 `Love.EditorTools` 改成了 `Love.Tools`，
+放在运行时程序集里还叫 EditorTools 是误导）：
+
+```
+SonyRawImporter  ImageRepair     PhotoLibrary    PhotoEditStore
+ExportPreset     CubeLutIO       ColorCheckerSolver
+TextStamp        SkyMaskBuilder  VideoFrameStream  FfmpegTool  AppHost
+```
+
+其中三个原本有编辑器依赖：
+
+- `ImageRepair` 的 `using UnityEditor;` 是**死的**，一个符号都没用到，摘掉即可
+- `FfmpegTool` 用 `EditorPrefs` 记 ffmpeg 路径
+- `PhotoEditStore` 用 `EditorApplication.timeSinceStartup` 做落盘限流
+
+后两个走 `Love.Tools.AppHost` 的委托注入，**不用 `#if UNITY_EDITOR`**：
+条件编译会让运行时程序集里出现 `UnityEditor` 这个名字，等于把边界交给宏去守。
+换成委托之后运行时这半根本不认识编辑器，编译器自己就把边界守住了。
+编辑器侧由 `AppHostEditor` 在 `InitializeOnLoad` 时换掉那几个委托。
+
+#### 边界得有人守
+
+```bash
+python Tools/checkruntime.py
+```
+
+**Unity 自己在编辑器里编 `Assembly-CSharp` 时是带 UnityEditor 引用的**，
+所以运行时代码碰了编辑器 API，在编辑器里根本发现不了，一出包才炸。
+这个脚本把那些引用和 `UNITY_EDITOR` 宏全摘掉再编一遍，逼出真实的出包条件。
+
+两道检查合起来才盖全：
+
+| 检查 | 抓的是 |
+|---|---|
+| 文本 | 光引了 `using UnityEditor;`、还没开始用 |
+| 编译 | 真去调了 `EditorPrefs` 这类 API |
+
+> 只靠编译查不干净：一堆包的编辑器程序集（`Unity.Sentis.Editor` 之类）
+> 在 `UnityEditor.*` 下声明了类型，所以一个**没被用到**的 `using UnityEditor;`
+> 是编得过的——可真出包时那些程序集根本不存在，照样报错。
+
+> 文本那道要挖掉 `#if UNITY_EDITOR` 块，那种写法是合法的
+> （`TitleScreen.HandleQuit` 就是：编辑器里停 Play，出包里 `Application.Quit`）。
+
+> **不看子进程退出码的检查是假的。** 编译器没跑起来时也没有 `error CS` 行，
+> 报出来就是"通过"——一个永远绿的检查比没有检查更糟。
+
+#### 界面：IMGUI 出包之后是能用的
+
+`GUI` / `GUILayout` / `Event` / `GUIStyle` 都在 UnityEngine 里，能用；
+不能用的只有 `EditorGUILayout` / `EditorStyles` / `EditorWindow`。
+也就是说编辑器那 973 行参数界面的**结构**能沿用，要换的只是控件那一层。
+
+而且那 973 行里，**73 个滑条全走同一个 `Slider(label, ref v, min, max)` 包装**，
+15 个 Toggle 走 `Toggle`，3 个走 `MinMax`。整套参数界面实际只经过 6~8 个包装。
+`RuntimeGui` 按同样的签名实现了一份，将来抽公共接口时两边能直接对上。
+
+#### 文件对话框
+
+独立程序里没有 `EditorUtility.OpenFilePanel`，只能叫 Win32 的通用对话框
+（`NativeFileDialog`，全项目唯一一处平台相关代码）。
+
+> **`OFN_NOCHANGEDIR` 必须带上。** 不带的话对话框会把进程的当前目录改成用户选的那个，
+> 之后所有相对路径全指到别处去，而且不会报错。
+
+#### 现在能干什么
+
+打开 JPG / PNG / **索尼 ARW**（复用同一份解码器）→ 缩放平移看图 →
+调 20 个常用参数 → 自动色调 → 导出 JPG / PNG。
+
+**还没搬过去的**：100+ 参数的完整面板、蒙版体系、污点修复、图片库、
+快照、AI 那两块、视频台。下一步是把 `GradeSettingsGUI` 的控件层抽成接口，
+让编辑器和独立程序共用同一份参数界面——那是投入产出比最高的一步。
+
 ### 几个实现约定
 
 **色彩空间**：曝光、白平衡、Bloom、色调映射、校色矩阵在**线性空间**做；
@@ -856,4 +945,6 @@ director.onStoryFinished  += () => Debug.Log("流程结束");
 ### 工具那半
 
 - **无损压缩 ARW** —— Lossless JPEG（Compression=7），A1 / A7 IV 之后的机身才有
-- **独立可执行的修图 App** —— 现在只有编辑器版
+- **独立程序的完整界面** —— 见上面「独立程序」一节。骨架和边界都通了，
+  参数面板还是最小版；把 `GradeSettingsGUI` 的控件层抽成接口是下一步
+- **独立的视频台** —— 图那边先跑通，视频那边的时间轴要重做一遍

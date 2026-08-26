@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Love.EditorTools;
+using Love.Tools;
 
 // PhotoLibrary 的逻辑测试。排序、筛选、多选这类东西的 bug 是"看着对、用起来串"，
 // 靠肉眼试很难覆盖到边角，正好它没有 GUI 依赖，可以直接跑。

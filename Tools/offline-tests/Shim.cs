@@ -41,6 +41,21 @@ namespace UnityEngine
         public static float Sin(float f) => (float)Math.Sin(f);
     }
 
+    public static class PlayerPrefs
+    {
+        static readonly System.Collections.Generic.Dictionary<string, string> Store =
+            new System.Collections.Generic.Dictionary<string, string>();
+        public static string GetString(string k, string d = "") => Store.TryGetValue(k, out var v) ? v : d;
+        public static void SetString(string k, string v) { Store[k] = v; }
+        public static void Save() { }
+    }
+
+    public static class Time
+    {
+        public static double realtimeSinceStartupAsDouble =>
+            System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
+    }
+
     public struct RectInt
     {
         public int x, y, width, height;

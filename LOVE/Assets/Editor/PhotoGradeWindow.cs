@@ -4,6 +4,7 @@ using System.IO;
 using Love.Video;
 using UnityEditor;
 using UnityEngine;
+using Love.Tools;
 
 namespace Love.EditorTools
 {

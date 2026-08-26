@@ -1,6 +1,6 @@
 using System;
 using System.Diagnostics;
-using Love.EditorTools;
+using Love.Tools;
 
 // 直接跑真实的 VideoFrameStream / FfmpegTool，量三种访问模式的实际耗时。
 static class StreamTest

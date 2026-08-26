@@ -7,6 +7,7 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.Video;
 using Debug = UnityEngine.Debug;
+using Love.Tools;
 
 namespace Love.EditorTools
 {

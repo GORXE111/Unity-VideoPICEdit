@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
-using UnityEditor;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>一处修补。存的是"怎么补"而不是补完的像素，所以可撤销、可重排、可整体清空。</summary>
     [Serializable]
