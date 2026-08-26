@@ -883,9 +883,32 @@ Slider("去朦胧", ref s.dehaze, -1f, 1f);
 打开 JPG / PNG / **索尼 ARW**（复用同一份解码器）→ 缩放平移看图 →
 调 20 个常用参数 → 自动色调 → 导出 JPG / PNG。
 
-**已经搬过去的**：97 个参数控件的完整面板（见上面「参数界面两边共用一份」）。
+#### 修图台里有什么
 
-**还没搬过去的**：曲线编辑、蒙版编辑、污点修复、图片库、快照、AI 那两块、视频台。
+| 小节 | 复用的是 |
+|---|---|
+| 文件 | `SonyRawImporter`（ARW）、`AutoTone`、`WhiteBalancePicker` |
+| 图片库 | `PhotoLibrary` —— 排序 / 筛选 / 星级 / 旗标 / 多选 |
+| 污点修复 / 仿制图章 | `ImageRepair` |
+| 快照 | `Snapshots` + `PhotoEditStore` |
+| LUT (.cube) | `CubeLutIO` —— 导入，也能把当前参数烘成一张 |
+| 色卡校色 | `ColorCheckerSolver` |
+| 导出 | `ExportNaming` + `TextStamp` —— 命名模板 / 长边上限 / 水印 / 批量 / 重名 |
+| 参数 | `GradeSettingsGUI` 97 个控件 |
+
+**逐图记录会落盘**：参数、修补、星级、快照都按图存，下次打开还在。
+写在 `persistentDataPath/UserSettings/` —— **不能写 exe 旁边**，
+装在 Program Files 下时那儿是只读的，而且失败得很安静。
+
+底下是胶片条：点选、Ctrl 加选、Shift 连选、1~5 打星、方向键换图。
+
+> **「选中」和「载入」必须分开。** 多选时 `Current` 已经先动了，
+> 如果载入函数还拿 `Current` 判断"要不要换图"，就永远相等、图片反而不换。
+> 所以另记一个 `_loadedPath`。
+
+**还没搬过去的**：曲线编辑、蒙版编辑、AI 降噪、AI 主体蒙版、天空蒙版。
+前两个是完整的子界面；后三个要先把 `AiDenoiser` / `AiMaskGenerator` 从
+编辑器侧移植过来（它们用 `AssetDatabase` 载 ONNX）。
 
 ### 几个实现约定
 

@@ -27,5 +27,14 @@ namespace Love.Tools
 
         /// <summary>开机到现在多少秒。只用来做限流，不需要绝对时刻。</summary>
         public static Func<double> TimeSinceStartup = () => Time.realtimeSinceStartupAsDouble;
+
+        /// <summary>
+        /// 逐图记录这类用户数据写哪儿。
+        ///
+        /// 编辑器里是工程根（跟着 .gitignore 里的 UserSettings/ 走），
+        /// 独立程序里是 persistentDataPath——**不能写 exe 旁边**，
+        /// 装在 Program Files 下时那儿是只读的，而且失败得很安静。
+        /// </summary>
+        public static Func<string> DataRoot = () => Application.persistentDataPath;
     }
 }

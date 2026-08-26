@@ -58,6 +58,7 @@ namespace Love.App
         const int OfnNoChangeDir = 0x00000008;
 
         const int OfnExplorer = 0x00080000;
+        const int OfnAllowMultiSelect = 0x00000200;
 
         static OpenFileNameW Make(string title, string filter, string initialDir, string defaultName)
         {
@@ -111,6 +112,29 @@ namespace Love.App
 #endif
         }
 
+        /// <summary>
+        /// 一次选多个文件。取消返回空数组。
+        ///
+        /// 多选时 Win32 回填的不是一个路径，而是「目录\0文件1\0文件2\0\0」，
+        /// 只选一个时又退回成单个完整路径。两种都要认。
+        /// </summary>
+        public static string[] OpenMany(string title, string filter, string initialDir = null)
+        {
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            var ofn = Make(title, filter, initialDir, null);
+            ofn.flags |= OfnFileMustExist | OfnAllowMultiSelect;
+
+            // 多选时缓冲区要够大，几百张图的路径加起来很容易过万
+            ofn.file = new string('\0', 65536);
+            ofn.maxFile = ofn.file.Length;
+
+            if (!GetOpenFileNameW(ref ofn)) return new string[0];
+            return SplitMulti(ofn.file);
+#else
+            return new string[0];
+#endif
+        }
+
         /// <summary>这个平台上能不能弹对话框。不能的话界面上要给别的路子。</summary>
         public static bool Supported
         {
@@ -122,6 +146,27 @@ namespace Love.App
         }
 
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+        static string[] SplitMulti(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return new string[0];
+
+            // 双零才是真结尾；单个零只是分隔
+            int end = raw.IndexOf("\0\0", System.StringComparison.Ordinal);
+            if (end < 0) end = raw.Length;
+
+            var parts = raw.Substring(0, end).Split('\0');
+            if (parts.Length == 0) return new string[0];
+
+            // 只选了一个的时候返回的就是完整路径，没有目录那一段
+            if (parts.Length == 1) return new[] { parts[0] };
+
+            var dir = parts[0];
+            var list = new System.Collections.Generic.List<string>(parts.Length - 1);
+            for (int i = 1; i < parts.Length; i++)
+                if (parts[i].Length > 0) list.Add(System.IO.Path.Combine(dir, parts[i]));
+            return list.ToArray();
+        }
+
         static string Trim(string s)
         {
             if (string.IsNullOrEmpty(s)) return null;

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using Love.Tools;
 using Love.Video;
@@ -6,103 +7,295 @@ using UnityEngine;
 namespace Love.App
 {
     /// <summary>
-    /// 修图台。开一张图、过管线、导出。
+    /// 修图台。
     ///
-    /// 解码、调色、自动色调、导出命名全是复用编辑器那边的同一份源码，
+    /// 图片库、修补、快照、导出、LUT、色卡、吸管——全部复用编辑器那边的同一份逻辑，
     /// 这个类只负责摆界面和管生命周期。
     /// </summary>
-    public class PhotoStation : IStation
+    public partial class PhotoStation : IStation
     {
+        /// <summary>画布上正在用哪个工具。</summary>
+        public enum Tool { None, Repair, Clone, WbPick, Chart }
+
         readonly Material _mat;
         readonly RuntimeGui _ui;
         VideoGradeRenderer _renderer;
 
         readonly VideoGradeSettings _settings = new VideoGradeSettings();
-        Texture2D _source;
+        readonly PhotoLibrary _lib = new PhotoLibrary();
+        readonly PhotoEditStore _store = new PhotoEditStore();
+        readonly ImageRepair _repair = new ImageRepair();
+        readonly Canvas2D _canvas = new Canvas2D();
+
+        Texture2D _full;
         RenderTexture _preview;
-        string _path;
-        string _status = "打开一张 JPG / PNG / 索尼 ARW";
+
+        /// <summary>
+        /// 大图现在载的是哪一条。
+        ///
+        /// **必须和 <c>_lib.Current</c> 分开。** 多选时 Current 已经先动了，
+        /// 如果载入函数还拿 Current 判断"要不要换图"，就永远相等、图片反而不换。
+        /// </summary>
+        string _loadedPath;
+
+        string _status = "打开图片，或者一次选一批";
         bool _dirty = true;
         bool _bypass;
+        Tool _tool = Tool.None;
 
-        readonly Canvas2D _canvas = new Canvas2D();
+        // 待生成缩略图的队列。Blit + ReadPixels 不能在 OnGUI 里做，排到 Tick
+        readonly Queue<string> _pending = new Queue<string>();
+
+        const int ThumbMax = 192;
 
         public PhotoStation(Material mat, RuntimeGui ui)
         {
             _mat = mat;
             _ui = ui;
             _settings.Reset();
+            _store.Load();
             if (mat != null) _renderer = new VideoGradeRenderer(mat);
         }
 
         public string Status => _status;
-        public bool HasSource => _source != null;
+        public bool HasSource => _full != null;
         public Vector2Int SourceSize =>
-            _source != null ? new Vector2Int(_source.width, _source.height) : Vector2Int.zero;
+            _full != null ? new Vector2Int(_full.width, _full.height) : Vector2Int.zero;
         public Texture Preview => _preview;
         public VideoGradeSettings Settings => _settings;
         public void MarkDirty() => _dirty = true;
-        public void OnHide() { }
+        public void OnHide() => Stash();
 
         public void Dispose()
         {
+            Stash();
+            _store.Save(force: true);
+
             _renderer?.Dispose();
             _renderer = null;
-            Release();
+            _repair.Dispose();
+            ReleaseFull();
+            ReleaseLut();
+            foreach (var e in _lib.All) if (e.thumb != null) Object.Destroy(e.thumb);
+            _lib.Clear();
         }
 
-        void Release()
+        void ReleaseFull()
         {
             if (_preview != null) { _preview.Release(); Object.Destroy(_preview); _preview = null; }
-            if (_source != null) { Object.Destroy(_source); _source = null; }
+            if (_full != null) { Object.Destroy(_full); _full = null; }
         }
 
-        // ---------------- 载入 ----------------
-
-        public void Load(string path)
+        /// <summary>当前这张的参数、修补、评级先收好再干别的。</summary>
+        void Stash()
         {
-            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+            if (_loadedPath == null) return;
+            _store.PutSettings(_loadedPath, _settings);
+            _store.PutRepairs(_loadedPath, _repair.Spots);
 
-            Texture2D tex = null;
-            if (SonyRawImporter.IsRaw(path))
+            var cur = _lib.Current;
+            if (cur != null && cur.path == _loadedPath) _store.PutMeta(cur.path, cur.rating, cur.flag);
+        }
+
+        // ---------------- 导入 ----------------
+
+        public void ImportMany(IEnumerable<string> paths)
+        {
+            int added = 0;
+            foreach (var p in paths)
             {
-                var r = SonyRawImporter.Load(path, new SonyRawImporter.Options());
-                if (r != null && r.texture != null) tex = r.texture;
-                else _status = "ARW 解码失败：" + (r?.error ?? "未知原因");
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) continue;
+                if (!IsImage(p) || _lib.Contains(p)) continue;
+                _pending.Enqueue(p);
+                added++;
             }
-            else
+            _status = added > 0 ? $"排队 {added} 张…" : "没有新图片";
+        }
+
+        /// <summary>把某张图所在的整个文件夹一起收进来。</summary>
+        public void ImportFolderOf(string anyFile)
+        {
+            string dir = Path.GetDirectoryName(anyFile);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            ImportMany(Directory.GetFiles(dir));
+        }
+
+        static bool IsImage(string p)
+        {
+            string e = Path.GetExtension(p).ToLowerInvariant();
+            return e == ".jpg" || e == ".jpeg" || e == ".png" || e == ".arw";
+        }
+
+        /// <summary>一拍处理一张。几百张一次做完的话窗口会僵住好几秒。</summary>
+        void ProcessPending()
+        {
+            if (_pending.Count == 0) return;
+            string p = _pending.Dequeue();
+            if (_lib.Contains(p)) return;
+
+            var thumb = MakeThumb(p);
+            if (thumb == null) return;
+
+            var entry = _lib.Add(p, Path.GetFileName(p), thumb);
+            entry.modified = SafeStamp(p);
+
+            // 之前调过这张的话，评级和旗标跟着回来
+            var rec = _store.Get(p);
+            if (rec != null) { entry.rating = rec.rating; entry.flag = rec.flag; }
+
+            _lib.Rebuild();
+            if (_lib.Current == null) { _lib.SelectOnly(entry); LoadEntry(entry); }
+
+            _status = _pending.Count > 0
+                ? $"排队中，还剩 {_pending.Count} 张"
+                : $"共 {_lib.Count} 张";
+        }
+
+        static long SafeStamp(string p)
+        {
+            try { return File.GetLastWriteTimeUtc(p).Ticks; } catch { return 0; }
+        }
+
+        Texture2D MakeThumb(string path)
+        {
+            Texture2D src = LoadTexture(path, preferPreview: true);
+            if (src == null) return null;
+
+            int w = src.width, h = src.height;
+            float k = ThumbMax / (float)Mathf.Max(w, h);
+            int tw = Mathf.Max(1, Mathf.RoundToInt(w * k));
+            int th = Mathf.Max(1, Mathf.RoundToInt(h * k));
+
+            var rt = RenderTexture.GetTemporary(tw, th, 0, RenderTextureFormat.ARGB32,
+                                                RenderTextureReadWrite.sRGB);
+            var thumb = new Texture2D(tw, th, TextureFormat.RGBA32, false, false);
+            try
             {
-                tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
-                if (!tex.LoadImage(File.ReadAllBytes(path)))
+                Graphics.Blit(src, rt);
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                thumb.ReadPixels(new Rect(0f, 0f, tw, th), 0, 0, false);
+                thumb.Apply(false, false);
+                RenderTexture.active = prev;
+            }
+            finally
+            {
+                RenderTexture.ReleaseTemporary(rt);
+                Object.Destroy(src);
+            }
+            return thumb;
+        }
+
+        /// <summary>
+        /// 读一张图。<paramref name="preferPreview"/> 时 RAW 只解嵌入的预览图——
+        /// 做缩略图不值得整解一遍 6100 万像素。
+        /// </summary>
+        Texture2D LoadTexture(string path, bool preferPreview)
+        {
+            try
+            {
+                if (SonyRawImporter.IsRaw(path))
                 {
-                    Object.Destroy(tex);
-                    tex = null;
-                    _status = "这张图读不了：" + Path.GetFileName(path);
+                    if (preferPreview)
+                    {
+                        var pv = SonyRawImporter.LoadPreviewOnly(path);
+                        if (pv != null) return pv;
+                    }
+                    var r = SonyRawImporter.Load(path, new SonyRawImporter.Options());
+                    if (r != null && r.texture != null) return r.texture;
+                    _status = "ARW 解码失败：" + (r?.error ?? "未知原因");
+                    return null;
                 }
-            }
 
+                var t = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
+                if (t.LoadImage(File.ReadAllBytes(path))) return t;
+                Object.Destroy(t);
+            }
+            catch (System.Exception e)
+            {
+                _status = "读不了 " + Path.GetFileName(path) + "：" + e.Message;
+            }
+            return null;
+        }
+
+        // ---------------- 选中 / 载入 ----------------
+
+        void Select(PhotoEntry e, bool additive, bool range)
+        {
+            if (e == null) return;
+            if (range) _lib.SelectRange(e);
+            else if (additive) _lib.Toggle(e);
+            else _lib.SelectOnly(e);
+
+            _lib.SetCurrent(e);
+            if (e.path != _loadedPath) LoadEntry(e);
+        }
+
+        void LoadEntry(PhotoEntry e)
+        {
+            if (e == null) return;
+
+            Stash();
+
+            var tex = LoadTexture(e.path, preferPreview: false);
             if (tex == null) return;
 
-            Release();
-            _source = tex;
-            _path = path;
-            _settings.Reset();
+            ReleaseFull();
+            _full = tex;
+            _loadedPath = e.path;
+
+            var rec = _store.Get(e.path);
+            if (rec != null && rec.hasSettings && rec.settings != null) _settings.CopyFrom(rec.settings);
+            else _settings.Reset();
+
+            _repair.Spots.Clear();
+            if (rec != null && rec.repairs != null) _repair.Spots.AddRange(rec.repairs);
+            _repair.InvalidateProbe();
+            _repairDirty = true;
+
             _canvas.Fit();
             _dirty = true;
-            _status = $"{Path.GetFileName(path)}　{tex.width}×{tex.height}";
+            _snapChanged = false;
+            _status = $"{e.name}　{tex.width}×{tex.height}　（{_lib.IndexOfVisible(e) + 1}/{_lib.Visible.Count}）";
         }
 
-        // ---------------- 渲染 ----------------
+        // ---------------- 每帧 ----------------
+
+        bool _repairDirty;
 
         public void Tick()
         {
+            ProcessPending();
+
+            // 限流落盘。拖滑条时不会每帧写文件，但崩了最多丢八秒
+            if (_store.Dirty) { Stash(); _store.Save(); }
+
+            if (_repairDirty)
+            {
+                _repairDirty = false;
+                _repair.Rebuild(_full);      // 里面有 Blit，只能在这里做
+                _dirty = true;
+            }
+
+            if (_pendingAction != null)
+            {
+                var a = _pendingAction;
+                _pendingAction = null;
+                a();
+            }
+
             // Blit 一律排到这里。OnGUI 里切 RenderTexture.active 会把 GUI 状态搅乱
-            if (_dirty && _source != null && _renderer != null) Render();
+            if (_dirty && _full != null && _renderer != null) Render();
         }
+
+        System.Action _pendingAction;
+
+        /// <summary>修补之后的图才是调色的源——在带噪/带污点的图上调色是白调。</summary>
+        Texture GradeSource => _repair.Result != null ? (Texture)_repair.Result : _full;
 
         void Render()
         {
-            _settings.OutputSize(_source.width, _source.height, out int w, out int h);
+            _settings.OutputSize(_full.width, _full.height, out int w, out int h);
 
             if (_preview == null || _preview.width != w || _preview.height != h)
             {
@@ -112,167 +305,135 @@ namespace Love.App
                 _preview.Create();
             }
 
-            _renderer.Render(_source, _preview, _settings,
-                             new VideoGradeRenderer.Options { bypass = _bypass });
+            _renderer.Render(GradeSource, _preview, _settings, new VideoGradeRenderer.Options
+            {
+                bypass = _bypass,
+                lut = _lut,
+                lutAmount = _lutAmount,
+            });
             _dirty = false;
         }
 
-        // ---------------- 界面 ----------------
+        // ---------------- 画布 ----------------
 
-        public void DrawCanvas(Rect area) => _canvas.Draw(area, _preview, _ui, "把图打开看看");
-
-        public void DrawPanel(RuntimeGui ui)
+        public void DrawCanvas(Rect area)
         {
-            GUILayout.Space(6f);
+            float strip = _lib.Count > 0 ? 108f : 0f;
+            var view = new Rect(area.x, area.y, area.width, Mathf.Max(60f, area.height - strip));
 
-            GUILayout.BeginHorizontal();
-            if (ui.Btn("打开图片…"))
-            {
-                string p = NativeFileDialog.Open("打开图片",
-                    "图片|*.jpg;*.jpeg;*.png;*.arw|索尼 RAW|*.arw|全部|*.*",
-                    _path != null ? Path.GetDirectoryName(_path) : null);
-                if (p != null) Load(p);
-            }
-            using (new GuiEnabled(_source != null))
-                if (ui.Btn("导出…")) Export();
-            GUILayout.EndHorizontal();
+            // 用工具的时候画布不该跟着平移
+            _canvas.DragTakenOver = _tool != Tool.None;
+            _canvas.Draw(view, _preview, _ui, "打开图片，或者一次选一批");
 
-            GUILayout.BeginHorizontal();
-            bool bp = GUILayout.Toggle(_bypass, "看原图", ui.Button, GUILayout.Height(20f));
-            if (bp != _bypass) { _bypass = bp; _dirty = true; }
-            if (ui.Btn("适应")) _canvas.Fit();
-            if (ui.Btn("1:1")) _canvas.OneToOne();
-            GUILayout.EndHorizontal();
+            if (_tool != Tool.None) HandleTool(view);
+            if (_tool == Tool.Chart) DrawChartOverlay();
 
-            using (new GuiEnabled(_source != null))
-            {
-                GUILayout.BeginHorizontal();
-                if (ui.Btn("自动色调")) AutoToneNow();
-                if (ui.Btn("重置参数")) { _settings.Reset(); _dirty = true; }
-                GUILayout.EndHorizontal();
-            }
+            if (strip > 0f)
+                DrawFilmstrip(new Rect(area.x, area.yMax - strip, area.width, strip));
         }
 
-        void AutoToneNow()
-        {
-            if (_source == null) return;
-
-            // GetPixels 在大图上是内存炸弹，先缩到小图再统计
-            const int Small = 256;
-            var rt = RenderTexture.GetTemporary(Small, Small, 0, RenderTextureFormat.ARGB32,
-                                                RenderTextureReadWrite.sRGB);
-            var tmp = new Texture2D(Small, Small, TextureFormat.RGBA32, false, true);
-            try
-            {
-                Graphics.Blit(_source, rt);
-                var prev = RenderTexture.active;
-                RenderTexture.active = rt;
-                tmp.ReadPixels(new Rect(0f, 0f, Small, Small), 0, 0, false);
-                tmp.Apply(false, false);
-                RenderTexture.active = prev;
-
-                AutoTone.Apply(tmp.GetPixels(), _settings);
-                _dirty = true;
-                _status = "已套用自动色调";
-            }
-            finally
-            {
-                RenderTexture.ReleaseTemporary(rt);
-                Object.Destroy(tmp);
-            }
-        }
-
-        void Export()
-        {
-            if (_preview == null || _path == null) return;
-
-            string name = Path.GetFileNameWithoutExtension(_path) + "_graded.jpg";
-            string outPath = NativeFileDialog.Save("导出图片", "JPEG|*.jpg|PNG|*.png", name,
-                                                   Path.GetDirectoryName(_path));
-            if (outPath == null) return;
-
-            if (_dirty) Render();
-
-            var readback = new Texture2D(_preview.width, _preview.height, TextureFormat.RGBA32,
-                                         false, false);
-            try
-            {
-                var prev = RenderTexture.active;
-                RenderTexture.active = _preview;
-                readback.ReadPixels(new Rect(0f, 0f, _preview.width, _preview.height), 0, 0, false);
-                readback.Apply(false, false);
-                RenderTexture.active = prev;
-
-                bool png = outPath.EndsWith(".png", System.StringComparison.OrdinalIgnoreCase);
-                File.WriteAllBytes(outPath, png ? readback.EncodeToPNG() : readback.EncodeToJPG(92));
-                _status = "已导出 " + Path.GetFileName(outPath);
-            }
-            finally
-            {
-                Object.Destroy(readback);
-            }
-        }
-    }
-
-    /// <summary>`using` 写法的 GUI.enabled，省得每次手动配对还原。</summary>
-    public readonly struct GuiEnabled : System.IDisposable
-    {
-        readonly bool _prev;
-        public GuiEnabled(bool on) { _prev = GUI.enabled; GUI.enabled = on && _prev; }
-        public void Dispose() => GUI.enabled = _prev;
-    }
-
-    /// <summary>看图的画布：缩放、平移、适应窗口。两个台共用。</summary>
-    public class Canvas2D
-    {
-        float _zoom = 1f;
-        Vector2 _pan;
-        bool _fit = true;
-
-        public void Fit() { _fit = true; _pan = Vector2.zero; }
-        public void OneToOne() { _fit = false; _zoom = 1f; _pan = Vector2.zero; }
-
-        public void Draw(Rect area, Texture tex, RuntimeGui ui, string emptyHint)
-        {
-            GUI.BeginGroup(area);
-
-            if (tex != null)
-            {
-                float iw = tex.width, ih = tex.height;
-                if (_fit) _zoom = Mathf.Min(area.width / iw, area.height / ih) * 0.94f;
-
-                float w = iw * _zoom, h = ih * _zoom;
-                GUI.DrawTexture(new Rect((area.width - w) * 0.5f + _pan.x,
-                                         (area.height - h) * 0.5f + _pan.y, w, h),
-                                tex, ScaleMode.StretchToFill, false);
-            }
-            else
-            {
-                GUI.Label(new Rect(0f, area.height * 0.5f - 12f, area.width, 24f), emptyHint,
-                          new GUIStyle(ui.Label) { alignment = TextAnchor.MiddleCenter });
-            }
-
-            GUI.EndGroup();
-            HandleInput(area);
-        }
-
-        void HandleInput(Rect area)
+        void HandleTool(Rect view)
         {
             var e = Event.current;
-            if (e == null || !area.Contains(e.mousePosition)) return;
+            if (e == null || !view.Contains(e.mousePosition)) return;
 
-            if (e.type == EventType.ScrollWheel)
+            bool click = e.type == EventType.MouseDown && e.button == 0;
+            bool drag = e.type == EventType.MouseDrag && e.button == 0;
+            if (!click && !drag) return;
+            if (!_canvas.ScreenToUv(e.mousePosition, out Vector2 uv)) return;
+
+            switch (_tool)
             {
-                _fit = false;
-                _zoom = Mathf.Clamp(_zoom * (1f - e.delta.y * 0.05f), 0.02f, 16f);
+                case Tool.Repair:
+                case Tool.Clone:
+                    if (click || drag) AddRepair(uv, _tool == Tool.Clone);
+                    e.Use();
+                    break;
+
+                case Tool.WbPick:
+                    if (click) { PickWhiteBalance(uv); _tool = Tool.None; e.Use(); }
+                    break;
+
+                case Tool.Chart:
+                    if (click || drag) { DragChartCorner(uv, click); e.Use(); }
+                    break;
+            }
+        }
+
+        // ---------------- 胶片条 ----------------
+
+        Vector2 _stripScroll;
+
+        void DrawFilmstrip(Rect area)
+        {
+            _ui.EnsureSkin();
+            GUI.DrawTexture(area, Texture2D.whiteTexture, ScaleMode.StretchToFill, false, 0f,
+                            new Color(0.11f, 0.11f, 0.12f, 1f), 0f, 0f);
+
+            var visible = _lib.Visible;
+            const float CellW = 96f, CellH = 84f, Gap = 4f;
+
+            var inner = new Rect(area.x + 4f, area.y + 4f, area.width - 8f, area.height - 8f);
+            var content = new Rect(0f, 0f, visible.Count * (CellW + Gap), inner.height - 18f);
+
+            _stripScroll = GUI.BeginScrollView(inner, _stripScroll, content, true, false);
+
+            for (int i = 0; i < visible.Count; i++)
+            {
+                var entry = visible[i];
+                var cell = new Rect(i * (CellW + Gap), 0f, CellW, CellH);
+
+                bool isCurrent = entry == _lib.Current;
+                bool isSelected = _lib.Selected.Contains(entry);
+
+                if (isCurrent || isSelected)
+                    GUI.DrawTexture(cell, Texture2D.whiteTexture, ScaleMode.StretchToFill, false, 0f,
+                                    isCurrent ? new Color(0.35f, 0.65f, 1f, 0.9f)
+                                              : new Color(1f, 1f, 1f, 0.25f), 0f, 0f);
+
+                var img = new Rect(cell.x + 3f, cell.y + 3f, cell.width - 6f, cell.height - 20f);
+                if (entry.thumb != null) GUI.DrawTexture(img, entry.thumb, ScaleMode.ScaleToFit);
+
+                // 星级和旗标就画在缩略图下沿，一眼扫得到
+                var meta = new Rect(cell.x + 3f, cell.yMax - 16f, cell.width - 6f, 14f);
+                string stars = entry.rating > 0 ? new string('★', entry.rating) : "";
+                string flag = entry.flag > 0 ? " ✓" : entry.flag < 0 ? " ✕" : "";
+                GUI.Label(meta, stars + flag, _ui.Mini);
+
+                if (GUI.Button(cell, GUIContent.none, GUIStyle.none))
+                    Select(entry, Event.current.control || Event.current.command,
+                           Event.current.shift);
+            }
+
+            GUI.EndScrollView();
+
+            GUI.Label(new Rect(area.x + 6f, area.yMax - 16f, area.width - 12f, 14f),
+                      $"{visible.Count} / {_lib.Count} 张　选中 {_lib.Selected.Count}　" +
+                      "点选，Ctrl 加选，Shift 连选，1~5 打星，0 清星",
+                      _ui.Mini);
+
+            HandleStripKeys();
+        }
+
+        void HandleStripKeys()
+        {
+            var e = Event.current;
+            if (e == null || e.type != EventType.KeyDown) return;
+
+            var cur = _lib.Current;
+            if (cur == null) return;
+
+            if (e.keyCode >= KeyCode.Alpha0 && e.keyCode <= KeyCode.Alpha5)
+            {
+                int r = e.keyCode - KeyCode.Alpha0;
+                foreach (var s in _lib.Selected) s.rating = r;
+                cur.rating = r;
+                _store.PutMeta(cur.path, cur.rating, cur.flag);
+                _lib.Rebuild();
                 e.Use();
             }
-            else if (e.type == EventType.MouseDrag && e.button == 0)
-            {
-                _fit = false;
-                _pan += e.delta;
-                e.Use();
-            }
+            else if (e.keyCode == KeyCode.LeftArrow) { Select(_lib.Step(-1), false, false); e.Use(); }
+            else if (e.keyCode == KeyCode.RightArrow) { Select(_lib.Step(1), false, false); e.Use(); }
         }
     }
 }

@@ -134,9 +134,7 @@ namespace Love.Tools
         {
             get
             {
-                // Application.dataPath 是 <工程>/Assets，往上一级才是工程根
-                string root = Path.GetDirectoryName(Application.dataPath) ?? ".";
-                return Path.Combine(root, "UserSettings", FileName);
+                return Path.Combine(AppHost.DataRoot(), "UserSettings", FileName);
             }
         }
 

@@ -133,6 +133,53 @@ namespace Love.App
                 : GUILayout.Button(label, _btn);
         }
 
+        /// <summary>带标签的下拉。IMGUI 没有现成的弹出菜单，点开就地展开成一列。</summary>
+        public int Popup2(string label, int value, string[] names)
+        {
+            if (names == null || names.Length == 0) return value;
+            value = Mathf.Clamp(value, 0, names.Length - 1);
+
+            int id = GUIUtility.GetControlID(FocusType.Passive);
+            _open.TryGetValue(id, out bool open);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, Label, GUILayout.Width(LabelWidth));
+            if (GUILayout.Button(names[value] + "  ▾", Button)) { open = !open; _open[id] = open; }
+            GUILayout.EndHorizontal();
+
+            if (!open) return value;
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(LabelWidth + 6f);
+                if (GUILayout.Button((i == value ? "● " : "   ") + names[i], Mini))
+                {
+                    _open[id] = false;
+                    Changed = true;
+                    GUILayout.EndHorizontal();
+                    return i;
+                }
+                GUILayout.EndHorizontal();
+            }
+            return value;
+        }
+
+        readonly System.Collections.Generic.Dictionary<int, bool> _open =
+            new System.Collections.Generic.Dictionary<int, bool>();
+
+        /// <summary>返回新值的开关。有些地方拿 ref 不方便。</summary>
+        public bool Toggle2(string label, bool value)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, Label, GUILayout.Width(LabelWidth));
+            bool v = GUILayout.Toggle(value, GUIContent.none);
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            if (v != value) Changed = true;
+            return v;
+        }
+
         public void Info(string text)
         {
             EnsureSkin();

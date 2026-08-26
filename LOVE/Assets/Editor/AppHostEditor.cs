@@ -17,6 +17,10 @@ namespace Love.EditorTools
             AppHost.GetPref = EditorPrefs.GetString;
             AppHost.SetPref = (k, v) => EditorPrefs.SetString(k, v);
             AppHost.TimeSinceStartup = () => EditorApplication.timeSinceStartup;
+
+            // 编辑器里写工程根的 UserSettings/，那个目录已经在 .gitignore 里
+            AppHost.DataRoot = () =>
+                System.IO.Path.GetDirectoryName(UnityEngine.Application.dataPath) ?? ".";
         }
     }
 }
