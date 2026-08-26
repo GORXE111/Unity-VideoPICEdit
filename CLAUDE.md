@@ -125,6 +125,7 @@ VideoGrade.shader    9 个 Pass，算法在 4 个 .cginc 里
 MaskBrush.shader     手绘笔刷，靠 BlendOp Max/Min 直接画进蒙版
 GradeMask            蒙版组与部件的数据（Lightroom 那套结构）
 ImageRepair          污点修复 / 仿制图章（编辑器侧），修补记录可重放
+PhotoLibrary         图片库：排序 / 筛选 / 评级 / 多选，纯逻辑无 GUI 依赖
 ImageRepair.shader   修补一处：仿制 + 色调补偿
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
@@ -242,6 +243,12 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   整个编辑器跟着发涩。只在真有变化时重绘。
 - **风格化必须排在蒙版之后**。暗角、颗粒这些作用于整幅成片，放在蒙版之前的话，
   一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序。
+- **能从窗口里分出来的纯逻辑就分出来**。`PhotoLibrary`（排序/筛选/多选）和
+  `ImageRepair`（找取样源）都没有 GUI 依赖，所以能用 `rawtest` 那套桩离线跑测试。
+  GUI 那半没法自动验，分出来的部分就该验到位。
+- **「选中」和「载入」必须分开**。多选时 `Current` 已经先动了，
+  如果载入函数还拿 `Current` 判断"要不要换图"，就永远相等、图片反而不换。
+  要单独记住"大图现在载的是哪一条路径"。
 - **修补类工具的羽化要从笔尖边缘往外扩，不能往里收**。往里收的话污点的外圈补不到，
   会留下一圈残影。
 - **启发式搜索的结果对浮点精度敏感**。`ImageRepair` 找取样源时，环上的采样点由

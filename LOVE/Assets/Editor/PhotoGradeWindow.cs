@@ -49,13 +49,6 @@ namespace Love.EditorTools
         enum Splitter { None, Right, Film }
         Splitter _dragging = Splitter.None;
 
-        /// <summary>胶片条里的一项。只常驻缩略图，原图按需加载，否则几十张 24MP 照片能吃掉几个 G。</summary>
-        class Entry
-        {
-            public string path;
-            public string name;
-            public Texture2D thumb;
-        }
 
         [SerializeField] VideoGradeSettings _settings = new VideoGradeSettings();
         [SerializeField] bool _splitCompare;
@@ -64,9 +57,17 @@ namespace Love.EditorTools
         [SerializeField] int _jpgQuality = 95;
         [SerializeField] bool _exportJpg;
 
-        readonly List<Entry> _entries = new List<Entry>();
+        // 图片库：排序、筛选、评级、多选都在里面。抽出去是因为那部分全是纯逻辑，能离线测
+        readonly PhotoLibrary _lib = new PhotoLibrary();
+
+        // 逐图参数。以前是一套参数管所有图，换一张图参数不变——
+        // 那对"开发一个 look"很顺手，但一批照片各自曝光不同时就不对了。
+        // 现在每张图有自己的一套，新图沿用当前这套当起点（相当于 Lightroom 的"上一张设置"）
+        readonly Dictionary<string, VideoGradeSettings> _settingsByPath =
+            new Dictionary<string, VideoGradeSettings>();
+        VideoGradeSettings _clipboard;
+        string _loadedPath;
         readonly List<string> _pendingImports = new List<string>();
-        int _selected = -1;
         int _pendingSelect = -1;
         System.Action _pendingAction;
         Texture2D _full;            // 当前选中图的原图，只留一张
@@ -359,7 +360,7 @@ namespace Love.EditorTools
 
             _tb.Button("打开图片…", 74f, OpenFiles, priority: 100);
             _tb.Button("文件夹…", 64f, OpenFolder, priority: 86);
-            _tb.Button("清空", 44f, ClearEntries, priority: 40, disabled: _entries.Count == 0);
+            _tb.Button("清空", 44f, ClearEntries, priority: 40, disabled: _lib.Count == 0);
 
             _tb.Space(8f);
 
@@ -445,7 +446,7 @@ namespace Love.EditorTools
 
             if (_full == null)
             {
-                GUI.Label(r, _entries.Count > 0 ? "未选中图片" : "未载入图片", GradeSkin.StatusDim);
+                GUI.Label(r, _lib.Count > 0 ? "未选中图片" : "未载入图片", GradeSkin.StatusDim);
                 return;
             }
 
@@ -465,7 +466,10 @@ namespace Love.EditorTools
                 Cell($"输出 {ow}×{oh}", 120f, GradeSkin.Status);
 
             Cell($"缩放 {_canvas.Zoom * 100f:0}%", 84f, GradeSkin.StatusDim);
-            Cell($"第 {_selected + 1} / {_entries.Count} 张", 100f, GradeSkin.StatusDim);
+                        int vis = _lib.Visible.Count, idx = _lib.IndexOfVisible(_lib.Current);
+            Cell($"第 {idx + 1} / {vis} 张" + (vis != _lib.Count ? $"（共 {_lib.Count}）" : ""),
+                 130f, GradeSkin.StatusDim);
+            if (_lib.Selected.Count > 1) Cell($"选中 {_lib.Selected.Count} 张", 84f, GradeSkin.Status);
             if (_lut != null) Cell($"LUT {_lutName}", 140f, GradeSkin.StatusDim);
         }
 
@@ -484,6 +488,8 @@ namespace Love.EditorTools
             _paramScroll = EditorGUILayout.BeginScrollView(_paramScroll);
 
             DrawMaskBar();
+            EditorGUILayout.Space(8f);
+            DrawSyncBar();
             EditorGUILayout.Space(8f);
             DrawRepairBar();
             EditorGUILayout.Space(8f);
@@ -730,6 +736,57 @@ namespace Love.EditorTools
             _dirty = true;
         }
 
+        /// <summary>
+        /// 参数的复制 / 粘贴 / 同步。
+        ///
+        /// 每张图有自己的一套参数，所以才需要这些。之前是一套管所有图，
+        /// 换图参数不变——开发 look 时顺手，但一批照片各自曝光不同时就不对了。
+        /// </summary>
+        void DrawSyncBar()
+        {
+            EditorGUILayout.LabelField("参数（逐图）", EditorStyles.boldLabel);
+
+            EditorGUILayout.BeginHorizontal();
+            using (new EditorGUI.DisabledScope(_full == null))
+                if (GUILayout.Button(new GUIContent("复制", "把当前这张的全部参数记下来")))
+                    _clipboard = _settings.Clone();
+
+            using (new EditorGUI.DisabledScope(_clipboard == null || _full == null))
+                if (GUILayout.Button(new GUIContent("粘贴", "套到当前这张")))
+                {
+                    Undo.RecordObject(this, "粘贴参数");
+                    _settings.CopyFrom(_clipboard);
+                    StashSettings();
+                    _dirty = true;
+                }
+            EditorGUILayout.EndHorizontal();
+
+            int sel = _lib.Selected.Count;
+            using (new EditorGUI.DisabledScope(sel < 2))
+                if (GUILayout.Button($"同步到选中的 {Mathf.Max(sel, 0)} 张"))
+                    SyncSettings(new List<PhotoEntry>(_lib.Selected));
+
+            using (new EditorGUI.DisabledScope(_lib.Visible.Count < 2))
+                if (GUILayout.Button($"同步到当前筛选下的 {_lib.Visible.Count} 张"))
+                    SyncSettings(new List<PhotoEntry>(_lib.Visible));
+
+            if (_clipboard != null)
+                EditorGUILayout.LabelField("剪贴板", "已存一套参数", EditorStyles.miniLabel);
+        }
+
+        void SyncSettings(List<PhotoEntry> targets)
+        {
+            if (targets.Count == 0) return;
+            if (!EditorUtility.DisplayDialog("同步参数",
+                    $"把当前这张的参数套到 {targets.Count} 张图上？\n\n它们各自原来的参数会被覆盖。",
+                    "同步", "取消"))
+                return;
+
+            StashSettings();
+            foreach (var e in targets) _settingsByPath[e.path] = _settings.Clone();
+            Debug.Log($"[修图台] 参数已同步到 {targets.Count} 张");
+        }
+
         #region 污点修复
 
         /// <summary>画布上的光标环，让人看清这一笔会盖住多大一块。</summary>
@@ -968,72 +1025,232 @@ namespace Love.EditorTools
 
         #region 胶片条
 
+        static readonly string[] SortNames = { "文件名", "日期", "星级" };
+        static readonly string[] FilterNames =
+            { "全部", "只看留用", "不看排除", "★1+", "★2+", "★3+", "★4+", "★5" };
+
         void DrawFilmstrip(Rect r)
         {
             EditorGUI.DrawRect(r, GradeSkin.Trough);
 
-            if (_entries.Count == 0)
+            var bar = new Rect(r.x + 4f, r.y + 2f, r.width - 8f, 16f);
+            DrawFilmBar(bar);
+
+            if (_lib.Count == 0)
             {
-                EditorGUI.LabelField(r, "图片列表为空", EditorStyles.centeredGreyMiniLabel);
+                EditorGUI.LabelField(new Rect(r.x, r.y + 20f, r.width, r.height - 20f),
+                                     "图片列表为空", EditorStyles.centeredGreyMiniLabel);
                 return;
             }
 
-            var header = new Rect(r.x + 6f, r.y + 2f, r.width - 12f, 14f);
-            EditorGUI.LabelField(header,
-                $"{_selected + 1} / {_entries.Count}    ← → 切换", EditorStyles.miniLabel);
-
             HandleFilmKeys();
 
-            var view = new Rect(r.x, r.y + 18f, r.width, r.height - 20f);
-            float rowW = _entries.Count * (ThumbSize + 8f) + 8f;
+            var view = new Rect(r.x, r.y + 20f, r.width, r.height - 22f);
+            var vis = _lib.Visible;
+
+            if (vis.Count == 0)
+            {
+                EditorGUI.LabelField(view, "当前筛选下没有图片", EditorStyles.centeredGreyMiniLabel);
+                return;
+            }
+
+            float rowW = vis.Count * (ThumbSize + 8f) + 8f;
             _filmScroll = GUI.BeginScrollView(view, _filmScroll,
                 new Rect(0f, 0f, rowW, view.height - 16f), false, false);
 
-            for (int i = 0; i < _entries.Count; i++)
+            for (int i2 = 0; i2 < vis.Count; i2++)
             {
-                var cell = new Rect(8f + i * (ThumbSize + 8f), 2f, ThumbSize, ThumbSize);
+                var e = vis[i2];
+                var cell = new Rect(8f + i2 * (ThumbSize + 8f), 2f, ThumbSize, ThumbSize);
+                bool isCurrent = ReferenceEquals(e, _lib.Current);
+                bool isSelected = _lib.Selected.Contains(e);
 
-                if (i == _selected)
-                    EditorGUI.DrawRect(new Rect(cell.x - 3f, cell.y - 3f, cell.width + 6f, cell.height + 6f),
-                                       GradeSkin.Accent);
+                // 当前那张用实心边框，同选中的其它张用半透明——
+                // 多选时必须一眼看出"大图在看哪一张"
+                if (isCurrent || isSelected)
+                {
+                    var ring = new Rect(cell.x - 3f, cell.y - 3f, cell.width + 6f, cell.height + 6f);
+                    EditorGUI.DrawRect(ring, isCurrent
+                        ? GradeSkin.Accent
+                        : new Color(GradeSkin.Accent.r, GradeSkin.Accent.g, GradeSkin.Accent.b, 0.45f));
+                }
 
                 EditorGUI.DrawRect(cell, new Color(0.06f, 0.07f, 0.08f));
-                var e = _entries[i];
                 if (e.thumb != null && Event.current.type == EventType.Repaint)
                     GUI.DrawTexture(cell, e.thumb, ScaleMode.ScaleToFit);
 
-                if (GUI.Button(cell, GUIContent.none, GUIStyle.none)) Select(i);
+                DrawThumbBadges(cell, e);
+
+                if (GUI.Button(cell, GUIContent.none, GUIStyle.none)) ClickThumb(e);
             }
 
             GUI.EndScrollView();
         }
 
+        /// <summary>缩略图上的角标：留用/排除在左上，星级在底边。</summary>
+        void DrawThumbBadges(Rect cell, PhotoEntry e)
+        {
+            if (Event.current.type != EventType.Repaint) return;
+
+            if (e.flag != 0)
+            {
+                var b = new Rect(cell.x + 2f, cell.y + 2f, 12f, 12f);
+                EditorGUI.DrawRect(b, e.flag > 0 ? new Color(0.35f, 0.75f, 0.4f)
+                                                 : new Color(0.8f, 0.3f, 0.3f));
+                GUI.Label(new Rect(b.x, b.y - 2f, 14f, 16f), e.flag > 0 ? "✓" : "✕",
+                          EditorStyles.miniLabel);
+            }
+
+            if (e.rating <= 0) return;
+
+            // 底边一条压暗的带子衬星星，亮图上才看得清
+            var strip = new Rect(cell.x, cell.yMax - 13f, cell.width, 13f);
+            EditorGUI.DrawRect(strip, new Color(0f, 0f, 0f, 0.55f));
+            GUI.Label(new Rect(strip.x + 2f, strip.y - 2f, strip.width, 16f),
+                      new string('★', e.rating), EditorStyles.miniLabel);
+        }
+
+        void DrawFilmBar(Rect r)
+        {
+            float x = r.x;
+
+            int sort = EditorGUI.Popup(new Rect(x, r.y, 60f, 16f), (int)_lib.Sort, SortNames,
+                                       EditorStyles.miniButton);
+            if (sort != (int)_lib.Sort) _lib.Sort = (PhotoSort)sort;
+            x += 62f;
+
+            if (GUI.Button(new Rect(x, r.y, 22f, 16f),
+                           new GUIContent(_lib.Descending ? "▼" : "▲", "升序 / 降序"),
+                           EditorStyles.miniButton))
+                _lib.Descending = !_lib.Descending;
+            x += 24f;
+
+            int filt = EditorGUI.Popup(new Rect(x, r.y, 74f, 16f), (int)_lib.Filter, FilterNames,
+                                       EditorStyles.miniButton);
+            if (filt != (int)_lib.Filter) _lib.Filter = (PhotoFilter)filt;
+            x += 78f;
+
+            using (new EditorGUI.DisabledScope(_lib.Visible.Count == 0))
+                if (GUI.Button(new Rect(x, r.y, 44f, 16f), "全选", EditorStyles.miniButton))
+                    _lib.SelectAllVisible();
+            x += 46f;
+
+            using (new EditorGUI.DisabledScope(_lib.Selected.Count == 0))
+                if (GUI.Button(new Rect(x, r.y, 58f, 16f),
+                               new GUIContent("移出列表", "只从列表拿掉，不动磁盘上的文件"),
+                               EditorStyles.miniButton))
+                    _pendingAction = RemoveSelected;
+            x += 62f;
+
+            GUI.Label(new Rect(x, r.y - 1f, r.xMax - x, 18f),
+                      $"{_lib.IndexOfVisible(_lib.Current) + 1} / {_lib.Visible.Count}" +
+                      (_lib.Selected.Count > 1 ? $"　选中 {_lib.Selected.Count}" : "") +
+                      "　←→ 切换 · Ctrl/Shift 多选 · 0~5 打分 · P 留用 X 排除 U 取消",
+                      EditorStyles.miniLabel);
+        }
+
+        void ClickThumb(PhotoEntry e)
+        {
+            var ev = Event.current;
+            if (ev.shift) _lib.SelectRange(e);
+            else if (ev.control || ev.command) _lib.Toggle(e);
+            else _lib.SelectOnly(e);
+
+            LoadEntry(_lib.Current);
+            Repaint();
+        }
+
         void HandleFilmKeys()
         {
             var e = Event.current;
-            if (e.type != EventType.KeyDown) return;
-            if (e.keyCode == KeyCode.LeftArrow) { Select(_selected - 1); e.Use(); }
-            else if (e.keyCode == KeyCode.RightArrow) { Select(_selected + 1); e.Use(); }
+            if (e.type != EventType.KeyDown || EditorGUIUtility.editingTextField) return;
+
+            if (e.keyCode == KeyCode.LeftArrow) { LoadEntry(_lib.Step(-1)); e.Use(); return; }
+            if (e.keyCode == KeyCode.RightArrow) { LoadEntry(_lib.Step(1)); e.Use(); return; }
+
+            // 打分和标记按 Lightroom 的键位，成批作用于所有选中的
+            int stars = -1;
+            if (e.keyCode >= KeyCode.Alpha0 && e.keyCode <= KeyCode.Alpha5) stars = e.keyCode - KeyCode.Alpha0;
+            else if (e.keyCode >= KeyCode.Keypad0 && e.keyCode <= KeyCode.Keypad5) stars = e.keyCode - KeyCode.Keypad0;
+
+            if (stars >= 0)
+            {
+                _lib.ApplyToSelection(x => _lib.SetRating(x, stars));
+                e.Use(); Repaint(); return;
+            }
+
+            int flag = 99;
+            if (e.keyCode == KeyCode.P) flag = 1;
+            else if (e.keyCode == KeyCode.X) flag = -1;
+            else if (e.keyCode == KeyCode.U) flag = 0;
+
+            if (flag != 99)
+            {
+                _lib.ApplyToSelection(x => _lib.SetFlag(x, flag));
+                e.Use(); Repaint();
+            }
         }
 
-        void Select(int index)
+        /// <summary>只从列表拿掉，不动磁盘。真删文件是另一回事，不该藏在这种按钮后面。</summary>
+        void RemoveSelected()
         {
-            if (_entries.Count == 0) return;
-            index = Mathf.Clamp(index, 0, _entries.Count - 1);
-            if (index == _selected && _full != null) return;
+            var gone = new List<PhotoEntry>(_lib.Selected);
+            if (gone.Count == 0) return;
 
-            // 换图之前先把当前这张的修补收好
+            bool hadCurrent = gone.Contains(_lib.Current);
+            foreach (var e in gone)
+            {
+                if (e.thumb != null) DestroyImmediate(e.thumb);
+                _settingsByPath.Remove(e.path);
+                _repairByPath.Remove(e.path);
+                _lib.Remove(e);
+            }
+
+            if (hadCurrent)
+            {
+                if (_full != null) { DestroyImmediate(_full); _full = null; }
+                _repair.Spots.Clear();
+                _repairDirty = true;
+                _loadedPath = null;
+                if (_lib.Visible.Count > 0) Select(_lib.Visible[0]);
+            }
+            Repaint();
+        }
+
+        /// <summary>单选一张并载入。</summary>
+        void Select(PhotoEntry e)
+        {
+            if (e == null) return;
+            _lib.SelectOnly(e);
+            LoadEntry(e);
+        }
+
+        /// <summary>
+        /// 把某张载进大图。只管载入，不碰选中状态——
+        /// 多选的时候选中集已经由 PhotoLibrary 定好了，这里再动一次就会把它清掉。
+        /// </summary>
+        void LoadEntry(PhotoEntry e)
+        {
+            if (e == null) return;
+            if (e.path == _loadedPath && _full != null) return;
+
+            // 换图之前先把上一张的修补和参数收好
             StashRepairs();
-
-            _selected = index;
+            StashSettings();
+            _loadedPath = e.path;
 
             if (_full != null) { DestroyImmediate(_full); _full = null; }
-            _full = LoadTextureFromFile(_entries[index].path);
+            _full = LoadTextureFromFile(e.path);
+
+            // 取回这张图自己的参数。没有就沿用当前这套当起点——
+            // 正在开发一个 look 时，翻到下一张不该被打回默认值
+            if (_settingsByPath.TryGetValue(e.path, out var saved2)) _settings.CopyFrom(saved2);
+            _settingsByPath[e.path] = _settings.Clone();
 
             // 取回这张图自己的修补。找源用的缩略图也得作废，
             // 否则会拿上一张图去搜取样点
             _repair.Spots.Clear();
-            if (_repairByPath.TryGetValue(_entries[index].path, out var saved))
+            if (_repairByPath.TryGetValue(e.path, out var saved))
                 _repair.Spots.AddRange(saved);
             _repair.InvalidateProbe();
             _cloneSource = null;
@@ -1077,7 +1294,7 @@ namespace Love.EditorTools
         /// <summary>只排队，真正的载入放到 Update 里做——生成缩略图要 Blit，不能在 GUI 里跑。</summary>
         void AddFile(string path, bool selectIt = true)
         {
-            if (_entries.Exists(x => x.path == path)) return;
+            if (_lib.Contains(path)) return;
             if (_pendingImports.Contains(path)) return;
             _pendingImports.Add(path);
             if (selectIt) _pendingSelect = -2;   // -2 = 导入完选中第一张新加的
@@ -1085,7 +1302,8 @@ namespace Love.EditorTools
 
         void ProcessPendingImports()
         {
-            int firstNew = _entries.Count;
+            int firstNew = _lib.Count;
+            PhotoEntry firstAdded = null;
 
             try
             {
@@ -1102,12 +1320,9 @@ namespace Love.EditorTools
                         : LoadTextureFromFile(path);
                     if (full == null) { Debug.LogError($"[修图台] 读不了这个文件：{path}"); continue; }
 
-                    _entries.Add(new Entry
-                    {
-                        path = path,
-                        name = Path.GetFileNameWithoutExtension(path),
-                        thumb = MakeThumbnail(full, ThumbPixels),
-                    });
+                    var added = _lib.Add(path, Path.GetFileNameWithoutExtension(path),
+                                         MakeThumbnail(full, ThumbPixels));
+                    if (firstAdded == null) firstAdded = added;
                     // 缩略图做完就把原图丢掉，选中时再按需加载
                     DestroyImmediate(full);
                 }
@@ -1118,25 +1333,33 @@ namespace Love.EditorTools
                 _pendingImports.Clear();
             }
 
-            if (_entries.Count > firstNew && (_selected < 0 || _pendingSelect == -2))
-                Select(firstNew);
+            if (_lib.Count > firstNew && (_lib.Current == null || _pendingSelect == -2))
+                Select(firstAdded);
             _pendingSelect = -1;
+        }
+
+        /// <summary>把当前图的参数记到路径下。换图前要调，否则改动会跟着丢。</summary>
+        void StashSettings()
+        {
+            if (!string.IsNullOrEmpty(_loadedPath)) _settingsByPath[_loadedPath] = _settings.Clone();
         }
 
         /// <summary>把当前图的修补记到路径下。换图和关窗前都要调。</summary>
         void StashRepairs()
         {
-            if (_selected < 0 || _selected >= _entries.Count) return;
-            string path = _entries[_selected].path;
+            if (string.IsNullOrEmpty(_loadedPath)) return;
+            string path = _loadedPath;
             if (_repair.Spots.Count > 0) _repairByPath[path] = new List<RepairSpot>(_repair.Spots);
             else _repairByPath.Remove(path);
         }
 
         void ClearEntries()
         {
-            foreach (var e in _entries) if (e.thumb != null) DestroyImmediate(e.thumb);
-            _entries.Clear();
-            _selected = -1;
+            foreach (var e in _lib.All) if (e.thumb != null) DestroyImmediate(e.thumb);
+            _lib.Clear();
+            _settingsByPath.Clear();
+            _repairByPath.Clear();
+            _loadedPath = null;
             if (_full != null) { DestroyImmediate(_full); _full = null; }
             ReleasePreview();
             Repaint();
@@ -1862,16 +2085,20 @@ namespace Love.EditorTools
                 // 排队到 Update 执行，不在 GUI 里做渲染和回读
                 if (GUILayout.Button("导出当前这张…")) _pendingAction = ExportSingle;
             }
-            using (new EditorGUI.DisabledScope(_entries.Count == 0))
+            using (new EditorGUI.DisabledScope(_lib.Visible.Count == 0))
             {
-                if (GUILayout.Button($"批量导出列表里全部（{_entries.Count} 张）…")) _pendingAction = ExportAll;
+                // 导出的是「筛选之后看得见的那些」，不是列表全部。
+                // 挑完片直接导出选中的那批，这才是挑片的意义
+                int n = _lib.Selected.Count > 1 ? _lib.Selected.Count : _lib.Visible.Count;
+                string what = _lib.Selected.Count > 1 ? "选中的" : "当前筛选下的";
+                if (GUILayout.Button($"批量导出{what} {n} 张…")) _pendingAction = ExportAll;
             }
         }
 
         void ExportSingle()
         {
             string ext = _exportJpg ? "jpg" : "png";
-            string suggested = (_selected >= 0 ? _entries[_selected].name : "photo") + "_graded";
+            string suggested = (_lib.Current != null ? _lib.Current.name : "photo") + "_graded";
             string path = EditorUtility.SaveFilePanel("导出修好的图片", "", suggested, ext);
             if (string.IsNullOrEmpty(path)) return;
 
@@ -1891,13 +2118,19 @@ namespace Love.EditorTools
             string ext = _exportJpg ? ".jpg" : ".png";
             int ok = 0;
 
+            // 选中多张就导这些，否则导当前筛选下看得见的那些。
+            // 挑完片直接导出选中的那批，这才是挑片的意义
+            var batch = _lib.Selected.Count > 1
+                ? new List<PhotoEntry>(_lib.Selected)
+                : new List<PhotoEntry>(_lib.Visible);
+
             try
             {
-                for (int i = 0; i < _entries.Count; i++)
+                for (int i = 0; i < batch.Count; i++)
                 {
-                    var entry = _entries[i];
+                    var entry = batch[i];
                     if (EditorUtility.DisplayCancelableProgressBar(
-                            "批量导出", entry.name, (float)i / _entries.Count)) break;
+                            "批量导出", entry.name, (float)i / batch.Count)) break;
 
                     // 源目录和输出目录相同会覆盖原图，这里靠改名避开
                     string outPath = Path.Combine(outDir, entry.name + "_graded" + ext);
@@ -1910,8 +2143,8 @@ namespace Love.EditorTools
             }
             finally { EditorUtility.ClearProgressBar(); }
 
-            Debug.Log($"[修图台] 批量导出完成：{ok}/{_entries.Count}");
-            EditorUtility.DisplayDialog("修图台", $"导出完成 {ok} / {_entries.Count} 张\n\n{outDir}", "好");
+            Debug.Log($"[修图台] 批量导出完成：{ok}/{batch.Count}");
+            EditorUtility.DisplayDialog("修图台", $"导出完成 {ok} / {batch.Count} 张\n\n{outDir}", "好");
             EditorUtility.RevealInFinder(outDir + "/");
         }
 
