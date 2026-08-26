@@ -46,6 +46,13 @@ namespace Love.Tools
         /// <summary>要一行的矩形。</summary>
         Rect Row();
 
+        /// <summary>要一行指定高度的矩形。</summary>
+        Rect Row(float height);
+
+        void PrefixLabel(string text);
+        void MiniBoldLabelW(string text, float width);
+        void MiniLabelW(string text, float width);
+
         /// <summary>标签栏有多宽。色块、色相条这些要按它对齐。</summary>
         float LabelWidth { get; }
 
@@ -64,6 +71,28 @@ namespace Love.Tools
         string TextField(string value);
         string SearchField(string value);
         void MinMaxSlider(ref float lo, ref float hi, float limitMin, float limitMax);
+
+        // ---- 蒙版列表要的那几个 ----
+        // 这一组都带尺寸或者画在指定矩形里。蒙版那一栏是一行挤好几个控件，
+        // 用自动排版挤不下，只能自己算位置
+
+        bool MiniButton(string label, float width);
+        bool MiniButtonIn(Rect r, string label, string tooltip);
+        bool MiniToggle(bool value, string label, float width);
+        bool MiniToggleIn(Rect r, bool value, string label, string tooltip);
+        bool ToggleIn(Rect r, bool value);
+        string TextFieldIn(Rect r, string value);
+        int PopupW(int value, string[] names, float width);
+        float FloatFieldW(float value, float width);
+        Vector2 Vector2Field(string label, Vector2 v);
+
+        /// <summary>
+        /// 在鼠标位置弹一个菜单。<paramref name="labels"/> 里带 "|" 的，后半是提示。
+        ///
+        /// 编辑器有 GenericMenu，独立程序没有——那边就地展开成一列按钮。
+        /// 两种形态差别不小，但都是"从几个里挑一个"，够用。
+        /// </summary>
+        void ContextMenu(string[] labels, System.Action<int> pick);
 
         /// <summary>
         /// 曲线编辑。
@@ -130,5 +159,25 @@ namespace Love.Tools
         Action DrawBrushOptions { get; set; }
 
         void Draw(VideoGradeSettings s, Action<string> recordUndo, Action markChanged);
+    }
+
+    /// <summary>
+    /// 什么也不做的蒙版节。
+    ///
+    /// 有它是为了让持有方永远不用判 null——那种判断漏一处就是一个空引用，
+    /// 而这些属性是每帧都在写的。
+    /// </summary>
+    public class NullMaskSection : IMaskSectionGui
+    {
+        public Vector2Int SourceSize { get; set; }
+        public bool HasSubjectMask { get; set; }
+        public bool HasSky { get; set; }
+        public float SkyCoverage { get; set; }
+        public bool HasDepthMap { get; set; }
+        public Func<int> RequestBrush { get; set; }
+        public MaskPart PaintingPart => null;
+        public MaskPart EditingPart => null;
+        public Action DrawBrushOptions { get; set; }
+        public void Draw(VideoGradeSettings s, Action<string> recordUndo, Action markChanged) { }
     }
 }

@@ -893,8 +893,10 @@ Slider("去朦胧", ref s.dehaze, -1f, 1f);
 | 快照 | `Snapshots` + `PhotoEditStore` |
 | LUT (.cube) | `CubeLutIO` —— 导入，也能把当前参数烘成一张 |
 | 色卡校色 | `ColorCheckerSolver` |
+| 天空检测 | `SkyDetect` + `SkyMaskBuilder` —— 纯 CPU，不用 Sentis |
+| AI 蒙版 / 降噪 | `AiMaskGenerator` + `AiDenoiser` |
 | 导出 | `ExportNaming` + `TextStamp` —— 命名模板 / 长边上限 / 水印 / 批量 / 重名 |
-| 参数 | `GradeSettingsGUI` 97 个控件 |
+| 参数 | `GradeSettingsGUI` 97 个控件 + `MaskListGUI` 蒙版体系 |
 
 **逐图记录会落盘**：参数、修补、星级、快照都按图存，下次打开还在。
 写在 `persistentDataPath/UserSettings/` —— **不能写 exe 旁边**，
@@ -906,9 +908,47 @@ Slider("去朦胧", ref s.dehaze, -1f, 1f);
 > 如果载入函数还拿 `Current` 判断"要不要换图"，就永远相等、图片反而不换。
 > 所以另记一个 `_loadedPath`。
 
-**还没搬过去的**：曲线编辑、蒙版编辑、AI 降噪、AI 主体蒙版、天空蒙版。
-前两个是完整的子界面；后三个要先把 `AiDenoiser` / `AiMaskGenerator` 从
-编辑器侧移植过来（它们用 `AssetDatabase` 载 ONNX）。
+#### AI 模型怎么进包
+
+**ONNX 只能在编辑器里导入**——`Unity.Sentis.ONNX` 是编辑器程序集，出包之后根本没有它。
+所以运行时只能用已经导入好的 `ModelAsset`，而 `ModelAsset` **只有被场景引用着才会进包**，
+放在 `Assets/` 里不引用是不会进的。
+
+`AiDenoiser` / `AiMaskGenerator` 里那句 `AssetDatabase.LoadAssetAtPath` 换成了注入：
+
+| | 谁来给 |
+|---|---|
+| 编辑器 | `AiHostEditor` —— 直接问 `AssetDatabase` |
+| 独立程序 | `ToolApp` 上序列化的一张「路径 → 模型」表，打包时由 `ToolAppBuild` 填 |
+
+和 `AppHost` 一样是注入而不是 `#if UNITY_EDITOR`：条件编译等于把边界交给宏去守。
+
+#### 曲线与蒙版编辑
+
+两边现在都能改。
+
+**蒙版列表**（`MaskListGUI`，396 行）也搬到了 `IGradeGui` 上，和参数面板一样两边共用。
+为它给接口补了一批带尺寸的控件——蒙版那一栏一行挤好几个控件，自动排版挤不下，
+只能自己算位置。弹出菜单也进了接口：编辑器有 `GenericMenu`，独立程序没有，
+那边就地展开成一列按钮。
+
+> **弹出菜单是跨帧的。** 这一帧只记下"要展开"，下一帧才画；点中之后回调在
+> 调用方早已返回之后才触发。所以候选名单必须先抓一份定死，
+> 不能在回调里再去遍历那会儿的状态。
+
+**曲线编辑器**是运行时自己写的：拖点改值，双击空白加点，双击点删点，切线自动平滑。
+
+> **首尾两个点只能上下拖，不能左右拖。** 曲线的定义域是整个 0~1，端点一旦挪进来，
+> 外面那段就没有定义、`Evaluate` 会平推出去——表现是高光或者暗部整片糊死，
+> 而且很难看出是曲线的锅。
+
+> 中间的点不能越过邻居。越过之后 `AnimationCurve` 会自己重排，
+> 手上拖的那个点会突然变成另一个，手感像是"点飞了"。
+
+#### 三条链路的先后
+
+**降噪 → 修补 → 调色。** 修补是拿周围像素补窟窿，在带噪的图上找取样源，
+补上去的那块也是带噪的、和周围对不上。
 
 ### 几个实现约定
 
@@ -1021,6 +1061,5 @@ director.onStoryFinished  += () => Debug.Log("流程结束");
 ### 工具那半
 
 - **无损压缩 ARW** —— Lossless JPEG（Compression=7），A1 / A7 IV 之后的机身才有
-- **独立程序里的曲线与蒙版编辑** —— 参数面板已经共用了，这两个是完整的子界面，
-  要在 `RuntimeGradeGui` 里各造一个
+- **独立的视频台里还没有蒙版和修补** —— 视频那边只有参数面板
 - **独立的视频台** —— 图那边先跑通，视频那边的时间轴要重做一遍

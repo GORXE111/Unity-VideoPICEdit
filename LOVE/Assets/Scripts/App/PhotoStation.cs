@@ -27,6 +27,15 @@ namespace Love.App
         readonly ImageRepair _repair = new ImageRepair();
         readonly Canvas2D _canvas = new Canvas2D();
 
+        /// <summary>蒙版那一节。外壳把控件层的那份交给这里，好往里塞"有没有天空/主体"。</summary>
+        IMaskSectionGui _guiMasks = new NullMaskSection();
+
+        public IMaskSectionGui MaskSection
+        {
+            get => _guiMasks;
+            set => _guiMasks = value ?? new NullMaskSection();
+        }
+
         Texture2D _full;
         RenderTexture _preview;
 
@@ -74,6 +83,8 @@ namespace Love.App
             _renderer?.Dispose();
             _renderer = null;
             _repair.Dispose();
+            ReleaseAi();
+            ReleaseSky();
             ReleaseFull();
             ReleaseLut();
             foreach (var e in _lib.All) if (e.thumb != null) Object.Destroy(e.thumb);
@@ -256,6 +267,7 @@ namespace Love.App
             _canvas.Fit();
             _dirty = true;
             _snapChanged = false;
+            ReleaseSky();
             _status = $"{e.name}　{tex.width}×{tex.height}　（{_lib.IndexOfVisible(e) + 1}/{_lib.Visible.Count}）";
         }
 
@@ -266,6 +278,7 @@ namespace Love.App
         public void Tick()
         {
             ProcessPending();
+            StepDenoise();
 
             // 限流落盘。拖滑条时不会每帧写文件，但崩了最多丢八秒
             if (_store.Dirty) { Stash(); _store.Save(); }
@@ -273,7 +286,7 @@ namespace Love.App
             if (_repairDirty)
             {
                 _repairDirty = false;
-                _repair.Rebuild(_full);      // 里面有 Blit，只能在这里做
+                _repair.Rebuild(DenoisedOrFull);   // 里面有 Blit，只能在这里做
                 _dirty = true;
             }
 
@@ -290,8 +303,13 @@ namespace Love.App
 
         System.Action _pendingAction;
 
-        /// <summary>修补之后的图才是调色的源——在带噪/带污点的图上调色是白调。</summary>
-        Texture GradeSource => _repair.Result != null ? (Texture)_repair.Result : _full;
+        /// <summary>
+        /// 调色的源。
+        ///
+        /// 顺序是**降噪 → 修补 → 调色**：修补是拿周围像素补窟窿，
+        /// 在带噪的图上找取样源，补上去的那块也是带噪的。
+        /// </summary>
+        Texture GradeSource => _repair.Result != null ? (Texture)_repair.Result : DenoisedOrFull;
 
         void Render()
         {
@@ -310,6 +328,9 @@ namespace Love.App
                 bypass = _bypass,
                 lut = _lut,
                 lutAmount = _lutAmount,
+                externalMask = CurrentMask,
+                depthMap = CurrentMask,   // 选了 MiDaS 时生成的就是深度图，共用一张
+                skyMask = EnsureSky(),
             });
             _dirty = false;
         }

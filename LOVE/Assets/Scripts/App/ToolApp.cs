@@ -15,6 +15,14 @@ namespace Love.App
         [Tooltip("VideoGrade 材质。必须在场景里引用着，否则出包时 shader 会被剔掉")]
         public Material gradeMaterial;
 
+#if LOVE_SENTIS
+        [Tooltip("AI 模型。ONNX 只能在编辑器里导入，出包之后只能用这里引用着的那些")]
+        public Unity.Sentis.ModelAsset[] models;
+
+        [Tooltip("和上面一一对应的资产路径，AI 那两个类按路径来找")]
+        public string[] modelPaths;
+#endif
+
         /// <summary>参数栏宽度。窗口窄的时候按比例收一点，别把画布挤没。</summary>
         public float PanelWidth => Mathf.Clamp(Screen.width * 0.26f, 260f, 380f);
 
@@ -37,9 +45,34 @@ namespace Love.App
 
         void OnEnable()
         {
+            SetupModels();
+
             _params = new GradeSettingsGUI(_backend);
-            _photo = new PhotoStation(gradeMaterial, _ui);
+            _photo = new PhotoStation(gradeMaterial, _ui) { MaskSection = _backend.Masks };
             _video = new VideoStation(gradeMaterial, _ui);
+        }
+
+        /// <summary>
+        /// 告诉 AI 那两个类去哪儿拿模型。
+        ///
+        /// **ONNX 只能在编辑器里导入**（Unity.Sentis.ONNX 是编辑器程序集），
+        /// 出包之后根本没有它。所以运行时只能用已经导入好的 ModelAsset，
+        /// 靠这个组件上的序列化引用带进包里。
+        /// </summary>
+        void SetupModels()
+        {
+#if LOVE_SENTIS
+            Unity.Sentis.ModelAsset Find(string path)
+            {
+                if (models == null || modelPaths == null) return null;
+                for (int i = 0; i < modelPaths.Length && i < models.Length; i++)
+                    if (modelPaths[i] == path) return models[i];
+                return null;
+            }
+
+            Love.Tools.AiDenoiser.ResolveModel = Find;
+            Love.Tools.AiMaskGenerator.ResolveModel = Find;
+#endif
         }
 
         void OnDisable()
@@ -98,6 +131,9 @@ namespace Love.App
                 if (_backend.EndChange() || _params.ConsumeExternalChange()) Active.MarkDirty();
             }
             GUILayout.EndArea();
+
+            // 菜单要盖在所有东西之上，所以放到最后
+            _backend.DrawPendingMenu();
         }
     }
 

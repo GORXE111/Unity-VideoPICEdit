@@ -64,6 +64,8 @@ namespace Love.App
                 if (ui.Group(ref _pSnap, "快照")) DrawSnapshots(ui);
                 if (ui.Group(ref _pLut, "LUT (.cube)")) DrawLut(ui);
                 if (ui.Group(ref _pChart, "色卡校色")) DrawChart(ui);
+                if (ui.Group(ref _pSky, "天空检测")) DrawSky(ui);
+                if (ui.Group(ref _pAi, "AI 蒙版 / 降噪")) DrawAi(ui);
                 if (ui.Group(ref _pExport, "导出")) DrawExport(ui);
             }
 
@@ -285,8 +287,13 @@ namespace Love.App
             _store.MarkDirty();
         }
 
-        /// <summary>找取样源要在原图上找，不能在已经修过的图上找，否则会越修越糊。</summary>
-        Texture GradeSourceRaw => _full;
+        /// <summary>
+        /// 找取样源用的底图：降噪之后、修补之前那一张。
+        ///
+        /// 不能用已经修过的图，否则会越修越糊；也不该用带噪的原图——
+        /// 那样补上去的一块自带噪点，和周围对不上。
+        /// </summary>
+        Texture GradeSourceRaw => DenoisedOrFull;
 
         // ---------------- 快照 ----------------
 

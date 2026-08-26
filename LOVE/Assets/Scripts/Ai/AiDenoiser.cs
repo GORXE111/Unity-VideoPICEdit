@@ -3,10 +3,9 @@ using System;
 using System.Collections.Generic;
 using Love.Video;
 using Unity.Sentis;
-using UnityEditor;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// AI 降噪。
@@ -57,6 +56,33 @@ namespace Love.EditorTools
                        fixedInput = 576, overlap = 32,
                        license = "Apache-2.0 (cszn/SCUNet)" },
         };
+
+
+        /// <summary>
+        /// 按路径拿模型资产。
+        ///
+        /// **ONNX 只能在编辑器里导入**——`Unity.Sentis.ONNX` 是编辑器程序集，
+        /// 出包之后根本没有它。所以运行时只能用已经导入好的 ModelAsset，
+        /// 由场景上的序列化引用带进包里。
+        ///
+        /// 编辑器走 AssetDatabase，独立程序走 ToolApp 上那张表。
+        /// 和 AppHost 一样是注入，不用 `#if UNITY_EDITOR` ——
+        /// 条件编译等于把边界交给宏去守。
+        /// </summary>
+        public static Func<string, ModelAsset> ResolveModel;
+
+        static ModelAsset Resolve(string path, out string error)
+        {
+            error = null;
+            if (ResolveModel == null)
+            {
+                error = "没人提供模型来源（ResolveModel 没设）";
+                return null;
+            }
+            var a = ResolveModel(path);
+            if (a == null) error = "找不到模型：" + path;
+            return a;
+        }
 
         // ---- 会话状态 ----
         Model _model;
@@ -109,12 +135,8 @@ namespace Love.EditorTools
             if (source == null) { error = "没有源图片"; return false; }
             if (spec == null) { error = "没有选模型"; return false; }
 
-            var asset = AssetDatabase.LoadAssetAtPath<ModelAsset>(spec.path);
-            if (asset == null)
-            {
-                error = "找不到模型：" + spec.path + "\n（模型没跟仓库一起发，见 README 的下载说明）";
-                return false;
-            }
+            var asset = Resolve(spec.path, out error);
+            if (asset == null) return false;
 
             // 块大小由模型的固定输入反推，不由调用方决定
             int readSize = Mathf.Max(16, spec.fixedInput);

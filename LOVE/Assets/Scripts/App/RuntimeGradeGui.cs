@@ -16,7 +16,7 @@ namespace Love.App
     /// 曲线编辑没做：那是个完整的子窗口。这里只把曲线画出来，
     /// 并且靠 <see cref="CanEditCurves"/> 让上层把话说清楚，而不是给个动不了的控件。
     /// </summary>
-    public class RuntimeGradeGui : IGradeGui
+    public partial class RuntimeGradeGui : IGradeGui
     {
         public float LabelWidth { get; set; } = 104f;
 
@@ -25,8 +25,14 @@ namespace Love.App
         int _indent;
         Texture2D _white;
 
-        readonly StubMasks _masks = new StubMasks();
+        readonly MaskListGUI _masks;
         public IMaskSectionGui Masks => _masks;
+
+        public RuntimeGradeGui()
+        {
+            // 蒙版列表和编辑器那边是同一份源码，只是控件层换成了这一份
+            _masks = new MaskListGUI(this);
+        }
 
         Texture2D White
         {
@@ -259,35 +265,6 @@ namespace Love.App
             lo = a; hi = b;
         }
 
-        public bool CanEditCurves => false;
-
-        /// <summary>只画不改。曲线编辑器是个完整的子窗口，不在这一轮的范围里。</summary>
-        public AnimationCurve Curve(string label, AnimationCurve curve, Color color, Rect range)
-        {
-            GUILayout.BeginHorizontal();
-            Ind();
-            GUILayout.Label(label, GUILayout.Width(LabelWidth));
-            var r = GUILayoutUtility.GetRect(40f, 34f, GUILayout.ExpandWidth(true));
-            GUILayout.EndHorizontal();
-
-            if (Event.current.type != EventType.Repaint || curve == null) return curve;
-
-            FillRect(r, new Color(0f, 0f, 0f, 0.35f));
-
-            const int Seg = 40;
-            Vector2 prev = Vector2.zero;
-            for (int i = 0; i <= Seg; i++)
-            {
-                float t = i / (float)Seg;
-                float x = range.x + t * range.width;
-                float y = Mathf.Clamp01((curve.Evaluate(x) - range.y) / Mathf.Max(range.height, 1e-4f));
-                var p = new Vector2(r.x + t * r.width, r.yMax - y * r.height);
-                if (i > 0) Line(prev, p, color, 1.5f);
-                prev = p;
-            }
-            return curve;
-        }
-
         // ---------------- 色轮 ----------------
 
         public float TrackBallHeight(float width) => width;
@@ -403,24 +380,5 @@ namespace Love.App
         GUIStyle Bold => _bold ?? (_bold = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold });
         GUIStyle Mini => _mini ?? (_mini = new GUIStyle(GUI.skin.label) { fontSize = 10, wordWrap = true });
 
-        /// <summary>蒙版编辑还没搬过来，先老实说，别给个动不了的界面。</summary>
-        class StubMasks : IMaskSectionGui
-        {
-            public Vector2Int SourceSize { get; set; }
-            public bool HasSubjectMask { get; set; }
-            public bool HasSky { get; set; }
-            public float SkyCoverage { get; set; }
-            public bool HasDepthMap { get; set; }
-            public Func<int> RequestBrush { get; set; }
-            public MaskPart PaintingPart => null;
-            public MaskPart EditingPart => null;
-            public Action DrawBrushOptions { get; set; }
-
-            public void Draw(VideoGradeSettings s, Action<string> recordUndo, Action markChanged)
-            {
-                GUILayout.Label("蒙版编辑还只在编辑器里。这里能看到已有蒙版的效果，但改不了。",
-                                new GUIStyle(GUI.skin.label) { fontSize = 10, wordWrap = true });
-            }
-        }
     }
 }

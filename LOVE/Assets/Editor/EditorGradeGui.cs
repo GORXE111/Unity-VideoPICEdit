@@ -14,7 +14,13 @@ namespace Love.EditorTools
     /// </summary>
     public class EditorGradeGui : IGradeGui
     {
-        readonly MaskListGUI _masks = new MaskListGUI();
+        readonly MaskListGUI _masks;
+
+        public EditorGradeGui()
+        {
+            // 蒙版列表也走同一套控件层，所以它要拿到的是 this
+            _masks = new MaskListGUI(this);
+        }
 
         /// <summary>撤销记到哪个对象上。窗口每帧设一次。</summary>
         public UnityEngine.Object UndoTarget { get; set; }
@@ -57,6 +63,56 @@ namespace Love.EditorTools
         public void Indent(int delta) => EditorGUI.indentLevel += delta;
 
         public Rect Row() => EditorGUILayout.GetControlRect();
+
+        public Rect Row(float height) => EditorGUILayout.GetControlRect(GUILayout.Height(height));
+
+        public void PrefixLabel(string text) => EditorGUILayout.PrefixLabel(text);
+
+        public void MiniBoldLabelW(string text, float width) =>
+            EditorGUILayout.LabelField(text, EditorStyles.miniBoldLabel, GUILayout.Width(width));
+
+        public void MiniLabelW(string text, float width) =>
+            EditorGUILayout.LabelField(text, EditorStyles.miniLabel, GUILayout.Width(width));
+
+        public bool MiniButton(string label, float width) =>
+            width > 0f
+                ? GUILayout.Button(label, EditorStyles.miniButton, GUILayout.Width(width))
+                : GUILayout.Button(label, EditorStyles.miniButton);
+
+        public bool MiniButtonIn(Rect r, string label, string tooltip) =>
+            GUI.Button(r, new GUIContent(label, tooltip), EditorStyles.miniButton);
+
+        public bool MiniToggle(bool value, string label, float width) =>
+            GUILayout.Toggle(value, label, EditorStyles.miniButton, GUILayout.Width(width));
+
+        public bool MiniToggleIn(Rect r, bool value, string label, string tooltip) =>
+            GUI.Toggle(r, value, new GUIContent(label, tooltip), EditorStyles.miniButton);
+
+        public bool ToggleIn(Rect r, bool value) => EditorGUI.Toggle(r, value);
+
+        public string TextFieldIn(Rect r, string value) => EditorGUI.TextField(r, value);
+
+        public int PopupW(int value, string[] names, float width) =>
+            EditorGUILayout.Popup(value, names, GUILayout.Width(width));
+
+        public float FloatFieldW(float value, float width) =>
+            EditorGUILayout.FloatField(value, GUILayout.Width(width));
+
+        public Vector2 Vector2Field(string label, Vector2 v) =>
+            EditorGUILayout.Vector2Field(label, v);
+
+        public void ContextMenu(string[] labels, Action<int> pick)
+        {
+            if (labels == null || labels.Length == 0 || pick == null) return;
+
+            var menu = new GenericMenu();
+            for (int i = 0; i < labels.Length; i++)
+            {
+                int idx = i;   // 闭包捕获的是变量不是值，不抓一份的话全指向最后一个
+                menu.AddItem(new GUIContent(labels[i]), false, () => pick(idx));
+            }
+            menu.ShowAsContext();
+        }
 
         public float LabelWidth => EditorGUIUtility.labelWidth;
 

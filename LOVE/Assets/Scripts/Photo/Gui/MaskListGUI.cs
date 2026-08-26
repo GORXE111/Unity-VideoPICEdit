@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
-using Love.Tools;
 using Love.Video;
-using UnityEditor;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
     /// 蒙版列表的界面。三个窗口共用。
@@ -15,6 +13,14 @@ namespace Love.EditorTools
     /// </summary>
     public class MaskListGUI : IMaskSectionGui
     {
+        /// <summary>控件从哪儿来。编辑器和独立程序各一份实现。</summary>
+        readonly IGradeGui G;
+
+        public MaskListGUI(IGradeGui gui)
+        {
+            G = gui ?? throw new System.ArgumentNullException(nameof(gui));
+        }
+
         /// <summary>当前源图尺寸，几何部件的界面提示要用。</summary>
         public Vector2Int SourceSize { get; set; }
 
@@ -72,10 +78,10 @@ namespace Love.EditorTools
 
             if (s.maskGroups.Count == 0)
             {
-                EditorGUILayout.HelpBox(
+                G.HelpBox(
                     "还没有蒙版。上面选一种来源新建一组。\n" +
                     "一组里可以叠多个部件：比如「渐变」加上，再「减」掉主体，就是只压天空不压人。",
-                    MessageType.None);
+                    GuiMsg.None);
                 return;
             }
 
@@ -87,25 +93,22 @@ namespace Love.EditorTools
 
         void DrawAddBar(VideoGradeSettings s)
         {
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("新建蒙版", EditorStyles.miniBoldLabel, GUILayout.Width(60f));
+            GUILayout.BeginHorizontal();
+            G.MiniBoldLabelW("新建蒙版", 60f);
 
-            if (GUILayout.Button("＋", EditorStyles.miniButton, GUILayout.Width(26f)))
+            if (G.MiniButton("＋", 26f))
             {
-                var menu = new GenericMenu();
-                foreach (var a in Adders)
-                {
-                    if (!Supported(a.shape)) continue;
-                    var shape = a.shape;
-                    string label = a.label;
-                    menu.AddItem(new GUIContent(label + "|" + a.tip), false, () => AddGroup(s, shape, label));
-                }
-                menu.ShowAsContext();
+                var usable = UsableAdders();
+                var labels = new string[usable.Count];
+                for (int i = 0; i < usable.Count; i++)
+                    labels[i] = usable[i].label + "|" + usable[i].tip;
+
+                G.ContextMenu(labels, i => AddGroup(s, usable[i].shape, usable[i].label));
             }
 
             GUILayout.FlexibleSpace();
-            EditorGUILayout.LabelField($"{s.maskGroups.Count} 组", EditorStyles.miniLabel, GUILayout.Width(40f));
-            EditorGUILayout.EndHorizontal();
+            G.MiniLabelW($"{s.maskGroups.Count} 组", 40f);
+            GUILayout.EndHorizontal();
         }
 
         void AddGroup(VideoGradeSettings s, MaskShape shape, string label)
@@ -145,25 +148,24 @@ namespace Love.EditorTools
             var g = s.maskGroups[index];
             bool expanded = _expanded == index;
 
-            var head = EditorGUILayout.GetControlRect(GUILayout.Height(20f));
+            var head = G.Row(20f);
             if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(head, expanded ? new Color(1f, 1f, 1f, 0.06f) : new Color(1f, 1f, 1f, 0.025f));
+                G.FillRect(head, expanded ? new Color(1f, 1f, 1f, 0.06f) : new Color(1f, 1f, 1f, 0.025f));
 
             float x = head.x + 2f;
 
-            bool on = EditorGUI.Toggle(new Rect(x, head.y + 2f, 16f, 16f), g.enabled);
+            bool on = G.ToggleIn(new Rect(x, head.y + 2f, 16f, 16f), g.enabled);
             if (on != g.enabled) { _recordUndo?.Invoke("启用蒙版"); g.enabled = on; _markChanged?.Invoke(); }
             x += 18f;
 
             // 名字可以直接改。一屏五六组时，"蒙版 3"这种名字等于没有
-            EditorGUI.BeginChangeCheck();
-            string nm = EditorGUI.TextField(new Rect(x, head.y + 1f, head.width - 150f, 18f), g.name);
-            if (EditorGUI.EndChangeCheck()) { _recordUndo?.Invoke("重命名蒙版"); g.name = nm; }
+            G.BeginChange();
+            string nm = G.TextFieldIn(new Rect(x, head.y + 1f, head.width - 150f, 18f), g.name);
+            if (G.EndChange()) { _recordUndo?.Invoke("重命名蒙版"); g.name = nm; }
             x = head.xMax - 128f;
 
-            bool ov = GUI.Toggle(new Rect(x, head.y + 1f, 42f, 18f),
-                                 g.showOverlay, new GUIContent("显示", "把选区以红色叠加在画面上"),
-                                 EditorStyles.miniButton);
+            bool ov = G.MiniToggleIn(new Rect(x, head.y + 1f, 42f, 18f), g.showOverlay,
+                                     "显示", "把选区以红色叠加在画面上");
             if (ov != g.showOverlay)
             {
                 _recordUndo?.Invoke("显示蒙版");
@@ -174,12 +176,12 @@ namespace Love.EditorTools
             }
             x += 44f;
 
-            if (GUI.Button(new Rect(x, head.y + 1f, 42f, 18f),
-                           expanded ? "收起" : "编辑", EditorStyles.miniButton))
+            if (G.MiniButtonIn(new Rect(x, head.y + 1f, 42f, 18f),
+                               expanded ? "收起" : "编辑", null))
                 _expanded = expanded ? -1 : index;
             x += 44f;
 
-            if (GUI.Button(new Rect(x, head.y + 1f, 22f, 18f), "×", EditorStyles.miniButton))
+            if (G.MiniButtonIn(new Rect(x, head.y + 1f, 22f, 18f), "×", null))
             {
                 _recordUndo?.Invoke("删除蒙版");
                 s.maskGroups.RemoveAt(index);
@@ -190,192 +192,198 @@ namespace Love.EditorTools
 
             if (!expanded) return false;
 
-            EditorGUI.indentLevel++;
+            G.Indent(1);
             DrawParts(g);
-            EditorGUILayout.Space(3f);
+            G.Space(3f);
             DrawGroupAdjust(g);
-            EditorGUI.indentLevel--;
-            EditorGUILayout.Space(4f);
+            G.Indent(-1);
+            G.Space(4f);
             return false;
         }
 
         void DrawParts(MaskGroup g)
         {
-            EditorGUILayout.LabelField("部件", EditorStyles.miniBoldLabel);
+            G.MiniBoldLabel("部件");
 
             for (int i = 0; i < g.parts.Count; i++)
             {
                 var p = g.parts[i];
 
-                EditorGUILayout.BeginHorizontal();
+                GUILayout.BeginHorizontal();
 
                 // 第一个部件恒按"加"处理，下拉框没有意义
-                using (new EditorGUI.DisabledScope(i == 0))
+                using (G.Disabled(i == 0))
                 {
-                    int op = EditorGUILayout.Popup(i == 0 ? 0 : p.op, OpNames, GUILayout.Width(46f));
+                    int op = G.PopupW(i == 0 ? 0 : p.op, OpNames, 46f);
                     if (i > 0 && op != p.op) { _recordUndo?.Invoke("蒙版合并方式"); p.op = op; _markChanged?.Invoke(); }
                 }
 
-                EditorGUILayout.LabelField(ShapeName(p.Shape), GUILayout.Width(70f));
+                G.MiniLabelW(ShapeName(p.Shape), 70f);
 
-                bool inv = GUILayout.Toggle(p.invert, "反相", EditorStyles.miniButton, GUILayout.Width(38f));
+                bool inv = G.MiniToggle(p.invert, "反相", 38f);
                 if (inv != p.invert) { _recordUndo?.Invoke("蒙版反相"); p.invert = inv; _markChanged?.Invoke(); }
 
                 if (p.Shape == MaskShape.Brush)
                 {
                     bool painting = ReferenceEquals(PaintingPart, p);
-                    bool want = GUILayout.Toggle(painting, "涂抹", EditorStyles.miniButton, GUILayout.Width(38f));
+                    bool want = G.MiniToggle(painting, "涂抹", 38f);
                     if (want != painting) { PaintingPart = want ? p : null; if (want) EditingPart = null; }
                 }
                 else if (p.IsGeometric)
                 {
                     // 只靠滑条对位置基本等于盲调，得能在画面上直接拖
                     bool editing = ReferenceEquals(EditingPart, p);
-                    bool want = GUILayout.Toggle(editing, "定位", EditorStyles.miniButton, GUILayout.Width(38f));
+                    bool want = G.MiniToggle(editing, "定位", 38f);
                     if (want != editing) { EditingPart = want ? p : null; if (want) PaintingPart = null; }
                 }
 
-                if (GUILayout.Button("×", EditorStyles.miniButton, GUILayout.Width(22f)))
+                if (G.MiniButton("×", 22f))
                 {
                     _recordUndo?.Invoke("删除部件");
                     if (ReferenceEquals(PaintingPart, p)) PaintingPart = null;
                     if (ReferenceEquals(EditingPart, p)) EditingPart = null;
                     g.parts.RemoveAt(i);
                     _markChanged?.Invoke();
-                    EditorGUILayout.EndHorizontal();
+                    GUILayout.EndHorizontal();
                     i--;
                     continue;
                 }
 
-                EditorGUILayout.EndHorizontal();
+                GUILayout.EndHorizontal();
 
-                EditorGUI.indentLevel++;
+                G.Indent(1);
                 DrawPartBody(p);
-                EditorGUI.indentLevel--;
+                G.Indent(-1);
             }
 
-            if (GUILayout.Button("＋ 添加部件", EditorStyles.miniButton))
+            if (G.MiniButton("＋ 添加部件", 0f))
             {
-                var menu = new GenericMenu();
-                foreach (var a in Adders)
+                var usable = UsableAdders();
+                var labels = new string[usable.Count];
+                for (int i = 0; i < usable.Count; i++) labels[i] = usable[i].label;
+
+                G.ContextMenu(labels, i =>
                 {
-                    if (!Supported(a.shape)) continue;
-                    var shape = a.shape;
-                    menu.AddItem(new GUIContent(a.label), false, () =>
-                    {
-                        _recordUndo?.Invoke("添加部件");
-                        g.parts.Add(NewPart(shape, false));
-                        _markChanged?.Invoke();
-                    });
-                }
-                menu.ShowAsContext();
+                    _recordUndo?.Invoke("添加部件");
+                    g.parts.Add(NewPart(usable[i].shape, false));
+                    _markChanged?.Invoke();
+                });
             }
         }
 
         void DrawPartBody(MaskPart p)
         {
-            EditorGUI.BeginChangeCheck();
+            G.BeginChange();
 
             switch (p.Shape)
             {
                 case MaskShape.Ellipse:
                 case MaskShape.Rect:
                 case MaskShape.LinearGradient:
-                    p.center = EditorGUILayout.Vector2Field("中心", p.center);
-                    p.size = EditorGUILayout.Vector2Field(
+                    p.center = G.Vector2Field("中心", p.center);
+                    p.size = G.Vector2Field(
                         p.Shape == MaskShape.LinearGradient ? "方向与跨度" : "半径", p.size);
-                    p.rotation = EditorGUILayout.Slider("旋转", p.rotation, -180f, 180f);
-                    p.feather = EditorGUILayout.Slider("羽化", p.feather, 0.001f, 1f);
+                    p.rotation = G.Slider("旋转", p.rotation, -180f, 180f);
+                    p.feather = G.Slider("羽化", p.feather, 0.001f, 1f);
                     if (ReferenceEquals(EditingPart, p))
-                        EditorGUILayout.HelpBox("正在画面上调整：拖黄点移动，白点改大小，蓝点转角度。",
-                                                MessageType.Info);
+                        G.HelpBox("正在画面上调整：拖黄点移动，白点改大小，蓝点转角度。",
+                                                GuiMsg.Info);
                     break;
 
                 case MaskShape.ColorRange:
-                    p.hueCenter = EditorGUILayout.Slider("色相中心", p.hueCenter, 0f, 1f);
-                    p.hueRange = EditorGUILayout.Slider("色相范围", p.hueRange, 0f, 0.5f);
-                    p.hueSoft = EditorGUILayout.Slider("色相柔和", p.hueSoft, 0.001f, 0.3f);
+                    p.hueCenter = G.Slider("色相中心", p.hueCenter, 0f, 1f);
+                    p.hueRange = G.Slider("色相范围", p.hueRange, 0f, 0.5f);
+                    p.hueSoft = G.Slider("色相柔和", p.hueSoft, 0.001f, 0.3f);
                     MinMax("饱和度区间", ref p.satMin, ref p.satMax, 0f, 1f);
-                    p.satSoft = EditorGUILayout.Slider("饱和柔和", p.satSoft, 0.001f, 0.5f);
+                    p.satSoft = G.Slider("饱和柔和", p.satSoft, 0.001f, 0.5f);
                     break;
 
                 case MaskShape.LuminanceRange:
                     MinMax("亮度区间", ref p.lumMin, ref p.lumMax, 0f, 1f);
-                    p.lumSoft = EditorGUILayout.Slider("柔和", p.lumSoft, 0.001f, 0.5f);
+                    p.lumSoft = G.Slider("柔和", p.lumSoft, 0.001f, 0.5f);
                     break;
 
                 case MaskShape.DepthRange:
                     MinMax("深度区间", ref p.depthMin, ref p.depthMax, 0f, 1f);
-                    p.depthSoft = EditorGUILayout.Slider("柔和", p.depthSoft, 0.001f, 0.5f);
+                    p.depthSoft = G.Slider("柔和", p.depthSoft, 0.001f, 0.5f);
                     if (!HasDepthMap)
-                        EditorGUILayout.HelpBox("还没有深度图，这个部件目前不选中任何东西。" +
-                                                "去「AI 蒙版」里选 MiDaS 模型生成一张。", MessageType.Warning);
+                        G.HelpBox("还没有深度图，这个部件目前不选中任何东西。" +
+                                                "去「AI 蒙版」里选 MiDaS 模型生成一张。", GuiMsg.Warning);
                     break;
 
                 case MaskShape.Sky:
                     if (HasSky)
-                        EditorGUILayout.HelpBox($"天空占画面 {SkyCoverage * 100f:F0}%。" +
-                                                "换图或者改了裁剪 / 旋转之后会自动重算。", MessageType.None);
+                        G.HelpBox($"天空占画面 {SkyCoverage * 100f:F0}%。" +
+                                                "换图或者改了裁剪 / 旋转之后会自动重算。", GuiMsg.None);
                     else
-                        EditorGUILayout.HelpBox("这张图没找到天空，所以这个部件目前不选中任何东西。" +
+                        G.HelpBox("这张图没找到天空，所以这个部件目前不选中任何东西。" +
                                                 "检测是从画面顶边往下漫延的：天空不在顶边（比如从窗户往外拍）、" +
                                                 "或者顶边全是树枝屋檐时找不到。那种情况用渐变或者画笔。",
-                                                MessageType.Warning);
+                                                GuiMsg.Warning);
                     break;
 
                 case MaskShape.Subject:
                     if (!HasSubjectMask)
-                        EditorGUILayout.HelpBox("还没有主体蒙版，这个部件目前不选中任何东西。" +
-                                                "去「AI 蒙版」里用 IS-Net 生成一张。", MessageType.Warning);
+                        G.HelpBox("还没有主体蒙版，这个部件目前不选中任何东西。" +
+                                                "去「AI 蒙版」里用 IS-Net 生成一张。", GuiMsg.Warning);
                     break;
 
                 case MaskShape.Brush:
                     if (p.brushId < 0)
-                        EditorGUILayout.HelpBox("这个笔刷没有分配到画布，删掉重新添加一次。", MessageType.Warning);
+                        G.HelpBox("这个笔刷没有分配到画布，删掉重新添加一次。", GuiMsg.Warning);
                     else if (ReferenceEquals(PaintingPart, p))
                     {
-                        EditorGUILayout.HelpBox("正在涂抹：在画面上拖拽即可，按住 Alt 擦除。", MessageType.Info);
+                        G.HelpBox("正在涂抹：在画面上拖拽即可，按住 Alt 擦除。", GuiMsg.Info);
                         DrawBrushOptions?.Invoke();
                     }
                     break;
             }
 
-            p.opacity = EditorGUILayout.Slider("不透明度", p.opacity, 0f, 1f);
+            p.opacity = G.Slider("不透明度", p.opacity, 0f, 1f);
 
-            if (!EditorGUI.EndChangeCheck()) return;
+            if (!G.EndChange()) return;
             _recordUndo?.Invoke("调整蒙版部件");
             _markChanged?.Invoke();
         }
 
         void DrawGroupAdjust(MaskGroup g)
         {
-            EditorGUILayout.LabelField("这一组的调整", EditorStyles.miniBoldLabel);
+            G.MiniBoldLabel("这一组的调整");
 
-            EditorGUI.BeginChangeCheck();
-            g.exposure = EditorGUILayout.Slider("曝光", g.exposure, -2f, 2f);
-            g.contrast = EditorGUILayout.Slider("对比度", g.contrast, 0f, 2f);
-            g.highlights = EditorGUILayout.Slider("高光", g.highlights, -1f, 1f);
-            g.shadows = EditorGUILayout.Slider("阴影", g.shadows, -1f, 1f);
-            g.saturation = EditorGUILayout.Slider("饱和度", g.saturation, 0f, 2f);
-            g.hueShift = EditorGUILayout.Slider("色相", g.hueShift, -0.5f, 0.5f);
-            g.tintHue = EditorGUILayout.Slider("染色色相", g.tintHue, 0f, 1f);
-            g.tintStrength = EditorGUILayout.Slider("染色强度", g.tintStrength, 0f, 1f);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            g.exposure = G.Slider("曝光", g.exposure, -2f, 2f);
+            g.contrast = G.Slider("对比度", g.contrast, 0f, 2f);
+            g.highlights = G.Slider("高光", g.highlights, -1f, 1f);
+            g.shadows = G.Slider("阴影", g.shadows, -1f, 1f);
+            g.saturation = G.Slider("饱和度", g.saturation, 0f, 2f);
+            g.hueShift = G.Slider("色相", g.hueShift, -0.5f, 0.5f);
+            g.tintHue = G.Slider("染色色相", g.tintHue, 0f, 1f);
+            g.tintStrength = G.Slider("染色强度", g.tintStrength, 0f, 1f);
+            if (!G.EndChange()) return;
 
             _recordUndo?.Invoke("调整蒙版参数");
             _markChanged?.Invoke();
         }
 
-        static void MinMax(string label, ref float lo, ref float hi, float limitMin, float limitMax)
+        void MinMax(string label, ref float lo, ref float hi, float limitMin, float limitMax)
         {
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.PrefixLabel(label);
-            lo = EditorGUILayout.FloatField(lo, GUILayout.Width(46f));
-            EditorGUILayout.MinMaxSlider(ref lo, ref hi, limitMin, limitMax);
-            hi = EditorGUILayout.FloatField(hi, GUILayout.Width(46f));
-            EditorGUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            G.PrefixLabel(label);
+            lo = G.FloatFieldW(lo, 46f);
+            G.MinMaxSlider(ref lo, ref hi, limitMin, limitMax);
+            hi = G.FloatFieldW(hi, 46f);
+            GUILayout.EndHorizontal();
             // 上下限交叉的话区间隶属度恒为 0，界面上看起来就是"蒙版突然全没了"
             if (hi < lo + 0.005f) hi = lo + 0.005f;
+        }
+
+        /// <summary>这一刻能加的那些形状。菜单是跨帧的，所以名单要先抓一份定死。</summary>
+        List<(MaskShape shape, string label, string tip)> UsableAdders()
+        {
+            var list = new List<(MaskShape, string, string)>();
+            foreach (var a in Adders)
+                if (Supported(a.shape)) list.Add((a.shape, a.label, a.tip));
+            return list;
         }
 
         static string ShapeName(MaskShape s)

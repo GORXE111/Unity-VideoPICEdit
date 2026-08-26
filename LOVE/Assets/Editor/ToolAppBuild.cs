@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using Love.App;
 using Love.Core;
@@ -48,6 +49,7 @@ namespace Love.EditorTools
             var appGo = new GameObject("ToolApp");
             var app = appGo.AddComponent<ToolApp>();
             app.gradeMaterial = mat;
+            AssignModels(app);
 
             // 窗口化。工具不该全屏——两个台都要和资源管理器、播放器来回切
             var screen = appGo.AddComponent<ScreenSetup>();
@@ -63,6 +65,50 @@ namespace Love.EditorTools
 
             EnsureShaderIncluded();
             Debug.Log("[工具包] 场景已生成：" + ScenePath);
+        }
+
+        /// <summary>
+        /// 把 AI 模型的引用挂到组件上。
+        ///
+        /// **ONNX 只能在编辑器里导入**（`Unity.Sentis.ONNX` 是编辑器程序集），
+        /// 出包之后根本没有它。所以运行时只能用已经导入好的 ModelAsset，
+        /// 而 ModelAsset 只有被场景引用着才会进包——放在 Assets 里不引用是不会进的。
+        ///
+        /// 路径也一并存下来：AI 那两个类内部是按路径认模型的，
+        /// 两边对不上就会报"找不到模型"。
+        /// </summary>
+        static void AssignModels(ToolApp app)
+        {
+#if LOVE_SENTIS
+            var paths = new List<string>();
+            foreach (var sp in Love.Tools.AiDenoiser.Presets) paths.Add(sp.path);
+            foreach (var sp in Love.Tools.AiMaskGenerator.Presets) paths.Add(sp.path);
+
+            var okPaths = new List<string>();
+            var okModels = new List<Unity.Sentis.ModelAsset>();
+            var missing = new List<string>();
+
+            foreach (var path in paths)
+            {
+                if (okPaths.Contains(path)) continue;
+                var m = AssetDatabase.LoadAssetAtPath<Unity.Sentis.ModelAsset>(path);
+                if (m == null) { missing.Add(path); continue; }
+                okPaths.Add(path);
+                okModels.Add(m);
+            }
+
+            app.modelPaths = okPaths.ToArray();
+            app.models = okModels.ToArray();
+
+            Debug.Log($"[工具包] 带上 {okModels.Count} 个 AI 模型" +
+                      (missing.Count > 0 ? "，缺 " + string.Join("、", missing) : ""));
+
+            if (missing.Count > 0)
+                Debug.LogWarning("[工具包] 上面那些模型没找到，出包之后对应的 AI 功能会报「找不到模型」。" +
+                                 "模型清单见 GameAssets/Models/模型授权.md");
+#else
+            Debug.LogWarning("[工具包] 没装 Sentis，AI 蒙版和 AI 降噪不会进包。天空检测不受影响。");
+#endif
         }
 
         /// <summary>
@@ -211,8 +257,11 @@ namespace Love.EditorTools
                 "  装了但找不到，可以在面板里手动指定 ffmpeg.exe。\n" +
                 "  预览是降分辨率解码的，导出走原始分辨率。\n\n" +
                 "参数面板\n" +
-                "  和编辑器里的修图台是同一份，97 个控件。\n" +
-                "  曲线和蒙版目前只能看不能改——那两个是完整的子界面，还没搬过来。\n\n" +
+                "  和编辑器里的修图台是同一份，97 个控件，曲线和蒙版都能改。\n\n" +
+                "AI\n" +
+                "  主体蒙版、降噪要用 GPU。降噪在 CPU 上一块 576² 要 7 秒，\n" +
+                "  6100 万像素切 247 块就是半小时。\n" +
+                "  天空检测不用 AI，是纯 CPU 的漫延算法，随时能用。\n\n" +
                 "画布\n" +
                 "  滚轮缩放，左键拖动平移。\n\n" +
                 "窗口\n" +
