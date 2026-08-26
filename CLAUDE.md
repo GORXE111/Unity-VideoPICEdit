@@ -177,6 +177,8 @@ SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损�
 GradeCanvas          预览画布：棋盘底 / 缩放平移 / 硬裁剪，只摆图不渲染
 GradeToolbar         会自己收纳的工具栏：先声明、后测量、再绘制
 GradeSkin            三个窗口统一的配色、尺寸与样式
+IGradeGui            参数界面的控件层，编辑器 / 独立程序各一份实现
+GradeSettingsGUI     97 个参数控件，三处共用（运行时，不碰编辑器 API）
 FfmpegTool           ffmpeg 定位与命令行拼装（解码、编码、单帧抓取、ffprobe）
 ```
 
@@ -194,7 +196,10 @@ FfmpegTool           ffmpeg 定位与命令行拼装（解码、编码、单帧�
 常驻进程顺序读只要 6.4ms，差二十倍。前者连 7fps 都跑不到。
 定位策略是：顺着读 → 前跳 24 帧以内读掉扔掉 → 更远或往回才重开进程。
 
-参数界面 100+ 控件，由 `Editor/GradeSettingsGUI.cs` 一份实现供两个窗口共用。
+参数界面 97 个控件，由 `Scripts/Photo/Gui/GradeSettingsGUI.cs` 一份实现供
+调色台、修图台、独立程序共用。它不碰任何编辑器 API，控件全走 `IGradeGui`：
+编辑器侧 `EditorGradeGui` 是 `EditorGUILayout` 的薄壳，独立程序侧
+`RuntimeGradeGui` 是纯 IMGUI。加一个参数仍然是加一行。
 
 **蒙版组**：一个组 = 若干部件（加/减/交）+ 一组自己的调整。部件数量不定，
 在 shader 里展不开，所以一个部件跑一趟 Pass、在两张单通道图之间乒乓累积。
@@ -351,6 +356,11 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   之后所有相对路径都指到别处，而且不报错。
 - **IMGUI 出包之后能用**，`EditorGUILayout` 不能。`GUI` / `GUILayout` / `Event` /
   `GUIStyle` 都在 UnityEngine 里，所以编辑器界面的结构能沿用，只要换控件那一层。
+- **机械替换要用结构比对验，不能只看编译过没过**。编译只保证类型对，
+  保证不了"有没有哪根滑条被换成了别的字段"。`GradeSettingsGUI` 抽接口时
+  是把改前改后所有控件的「控件名 + 标签 + 字段 + 范围」抽出来逐个比的。
+- **给编辑器 API 抽壳时，壳里一行都不要多做**。抽接口是为了换实现，
+  不是趁机改行为；多做一点，窗口的手感就变了，而那种差别很难查。
 - **渐变插值的起点要先快照**。直接拿被写入的对象当插值基准，每帧基准都在动，
   结果是一条越来越慢、永远到不了终点的曲线。
 

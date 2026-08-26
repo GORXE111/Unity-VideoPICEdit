@@ -1,25 +1,32 @@
 using System;
 using System.Collections.Generic;
 using Love.Video;
-using UnityEditor;
 using UnityEngine;
 
-namespace Love.EditorTools
+namespace Love.Tools
 {
     /// <summary>
-    /// 调色参数的界面绘制，调色台和修图台共用一份。
-    /// 参数有 60 多个，分两处维护迟早会不一致。
+    /// 调色参数的界面绘制，调色台、修图台、独立程序共用一份。
+    /// 参数有 100 多个，分几处维护迟早会不一致。
     ///
     /// 每个控件都用 ref 直接指向 settings 上的字段，加参数就是加一行。
+    ///
+    /// **这个类不认识编辑器。** 所有控件都经过 <see cref="IGradeGui"/>，
+    /// 编辑器那份实现是 EditorGUILayout 的薄壳，独立程序那份是纯 IMGUI。
+    /// 布局、按钮、拖拽这些没进接口——`GUILayout` / `GUI` / `Event` 出包之后本来就能用。
     /// </summary>
     public class GradeSettingsGUI
     {
+        /// <summary>控件从哪儿来。构造时必须给，中途不换。</summary>
+        readonly IGradeGui G;
+
+        public GradeSettingsGUI(IGradeGui gui)
+        {
+            G = gui ?? throw new ArgumentNullException(nameof(gui));
+        }
+
         static readonly Rect CurveRange = new Rect(0f, 0f, 1f, 1f);
 
-        // 折叠状态存 EditorPrefs：程序集一重载普通字段就重置，
-        // 每次改完代码所有分组都弹回默认状态很烦
-        // 折叠状态按 key 存 EditorPrefs：程序集一重载普通字段就重置，
-        // 每次改完代码所有分组都弹回默认状态很烦。
         // key -> 默认是否展开
         static readonly (string key, string title, bool open, string words)[] Groups =
         {
@@ -44,7 +51,7 @@ namespace Love.EditorTools
         bool Filtering => !string.IsNullOrEmpty(_filter);
 
         /// <summary>蒙版列表。窗口要往里塞「有没有主体蒙版 / 深度图」，也要读「正在涂哪个笔刷」。</summary>
-        public MaskListGUI Masks { get; } = new MaskListGUI();
+        public IMaskSectionGui Masks => G.Masks;
 
         void DrawMasks(VideoGradeSettings s)
         {
@@ -55,18 +62,21 @@ namespace Love.EditorTools
             Masks.Draw(s, RecordUndo, () => _externalChange = true);
 
             if (s.ActiveMaskGroups > 1)
-                EditorGUILayout.HelpBox($"{s.ActiveMaskGroups} 组生效中。每组要多跑两趟全分辨率的 Pass，" +
-                                        "图片无所谓，视频上组数多了会拖慢预览。", MessageType.None);
+                G.HelpBox($"{s.ActiveMaskGroups} 组生效中。每组要多跑两趟全分辨率的 Pass，" +
+                                        "图片无所谓，视频上组数多了会拖慢预览。", GuiMsg.None);
         }
 
         string _newPresetName = "";
         List<string> _presetCache;
         double _presetCacheTime;
 
-        static bool GetFold(string key, bool def) => EditorPrefs.GetBool("GradeGUI.fold." + key, def);
-        static void SetFold(string key, bool value) => EditorPrefs.SetBool("GradeGUI.fold." + key, value);
+        // 折叠状态要落盘：编辑器里程序集一重载普通字段就重置，
+        // 每次改完代码所有分组都弹回默认状态很烦
+        static bool GetFold(string key, bool def) =>
+            AppHost.GetPref("GradeGUI.fold." + key, def ? "1" : "0") == "1";
 
-        UnityEngine.Object _undoTarget;
+        static void SetFold(string key, bool value) =>
+            AppHost.SetPref("GradeGUI.fold." + key, value ? "1" : "0");
 
         /// <summary>Power Window 的画中画预览用的贴图，传 null 就不显示预览。</summary>
         public Texture PreviewTexture { get; set; }
@@ -98,10 +108,8 @@ namespace Love.EditorTools
             return v;
         }
 
-        public void Draw(VideoGradeSettings s, UnityEngine.Object undoTarget)
+        public void Draw(VideoGradeSettings s)
         {
-            _undoTarget = undoTarget;
-
             DrawSearchBar();
 
             if (Group("library")) DrawPresetLibrary(s);
@@ -110,17 +118,17 @@ namespace Love.EditorTools
 
             if (Group("log"))
             {
-                EditorGUI.BeginChangeCheck();
-                var lm = (LogMode)EditorGUILayout.EnumPopup("LOG 编码", (LogMode)s.logMode);
-                if (EditorGUI.EndChangeCheck()) { RecordUndo("LOG 编码"); s.logMode = (int)lm; }
+                G.BeginChange();
+                int lm = G.Popup("LOG 编码", s.logMode, LogModeNames);
+                if (G.EndChange()) { RecordUndo("LOG 编码"); s.logMode = lm; }
                 if (s.logMode != 0)
-                    EditorGUILayout.HelpBox("已解码回线性。LOG 素材必须先解码再调色，否则拉对比度会又灰又脏。",
-                                            MessageType.None);
+                    G.HelpBox("已解码回线性。LOG 素材必须先解码再调色，否则拉对比度会又灰又脏。",
+                                            GuiMsg.None);
 
                 Toggle("启用色卡校色矩阵", ref s.colorMatrixEnabled);
                 if (s.colorMatrixEnabled && (s.colorMatrix == null || s.colorMatrix.Length < 12))
-                    EditorGUILayout.HelpBox("还没有解出矩阵，去修图台的「色卡校色」里拍一张 24 色卡解算。",
-                                            MessageType.Warning);
+                    G.HelpBox("还没有解出矩阵，去修图台的「色卡校色」里拍一张 24 色卡解算。",
+                                            GuiMsg.Warning);
             }
 
             if (Group("quality"))
@@ -130,12 +138,12 @@ namespace Love.EditorTools
                 Slider("  通透半径", ref s.clarityRadius, 2f, 16f);
                 Slider("纹理", ref s.texture, -1f, 1f);
                 Slider("去朦胧", ref s.dehaze, -1f, 1f);
-                EditorGUILayout.Space(2f);
+                G.Space(2f);
                 Slider("锐化", ref s.sharpen, 0f, 2f);
                 Slider("  只锐对焦区", ref s.sharpenFocusOnly, 0f, 1f);
-                EditorGUILayout.HelpBox("纹理负值可磨皮；「只锐对焦区」靠局部对比判断，避免把背景噪点锐出来。\n" +
+                G.HelpBox("纹理负值可磨皮；「只锐对焦区」靠局部对比判断，避免把背景噪点锐出来。\n" +
                                         "去朦胧走大气散射模型，负值反过来是加雾。它不带饱和度补偿，通常要配合饱和度一起调。",
-                                        MessageType.None);
+                                        GuiMsg.None);
             }
 
             if (Group("primary"))
@@ -166,7 +174,7 @@ namespace Love.EditorTools
                 Slider("肤色保护", ref s.skinProtect, 0f, 1f);
                 Slider("色相", ref s.hueShift, -0.5f, 0.5f);
 
-                EditorGUILayout.Space(4f);
+                G.Space(4f);
                 TintRow("阴影染色", () => s.shadowHue, () => s.shadowStrength,
                         (h, st) => { s.shadowHue = h; s.shadowStrength = st; });
                 TintRow("高光染色", () => s.highlightHue, () => s.highlightStrength,
@@ -181,9 +189,9 @@ namespace Love.EditorTools
             if (Group("sixcurve"))
             {
                 Toggle("启用六条曲线", ref s.sixCurveEnabled);
-                using (new EditorGUI.DisabledScope(!s.sixCurveEnabled))
+                using (G.Disabled(!s.sixCurveEnabled))
                 {
-                    EditorGUILayout.HelpBox("横轴是输入、纵轴是增减量，中线 0.5 是不变。", MessageType.None);
+                    G.HelpBox("横轴是输入、纵轴是增减量，中线 0.5 是不变。", GuiMsg.None);
                     SixCurveField("色相 vs 色相", ref s.hueVsHue);
                     SixCurveField("色相 vs 饱和", ref s.hueVsSat);
                     SixCurveField("色相 vs 亮度", ref s.hueVsLum);
@@ -206,7 +214,7 @@ namespace Love.EditorTools
 
             if (Group("aimask"))
             {
-                EditorGUILayout.HelpBox("先在上面生成蒙版，这里的参数才有效果。", MessageType.None);
+                G.HelpBox("先在上面生成蒙版，这里的参数才有效果。", GuiMsg.None);
                 Slider("背景虚化", ref s.backgroundBlur, 0f, 1f);
                 Toggle("反选（作用于背景）", ref s.maskInvert);
                 Slider("边缘收缩", ref s.maskLow, 0f, 0.6f);
@@ -220,21 +228,21 @@ namespace Love.EditorTools
                 Slider("辉光强度", ref s.bloomIntensity, 0f, 3f);
                 Slider("辉光扩散", ref s.bloomScatter, 0f, 1f);
                 Slider("整体模糊", ref s.blur, 0f, 1f);
-                EditorGUILayout.Space(4f);
+                G.Space(4f);
                 Slider("抖动", ref s.dither, 0f, 1f);
-                EditorGUILayout.Space(4f);
-                EditorGUILayout.LabelField("镜头", EditorStyles.miniBoldLabel);
+                G.Space(4f);
+                G.MiniBoldLabel("镜头");
                 Slider("  畸变", ref s.distortK1, -0.5f, 0.5f);
                 Slider("  畸变高阶", ref s.distortK2, -0.3f, 0.3f);
                 Slider("  缩放补偿", ref s.distortScale, 0.8f, 1.3f);
-                EditorGUILayout.Space(2f);
+                G.Space(2f);
                 Slider("暗角强度", ref s.vignetteIntensity, 0f, 1f);
                 Slider("暗角柔和", ref s.vignetteSmoothness, 0f, 1f);
                 Slider("颗粒", ref s.grain, 0f, 0.3f);
                 Slider("色差", ref s.chromatic, 0f, 2f);
 
-                EditorGUILayout.Space(4f);
-                EditorGUILayout.LabelField("斑马纹（监看用，导出不受影响）", EditorStyles.miniBoldLabel);
+                G.Space(4f);
+                G.MiniBoldLabel("斑马纹（监看用，导出不受影响）");
                 Slider("  过曝阈值", ref s.zebraHigh, 0f, 1f);
                 Slider("  欠曝阈值", ref s.zebraLow, 0f, 0.2f);
             }
@@ -249,38 +257,38 @@ namespace Love.EditorTools
         void DrawPresetLibrary(VideoGradeSettings s)
         {
             // 目录列举有磁盘开销，缓存一秒，避免每帧都扫
-            if (_presetCache == null || EditorApplication.timeSinceStartup - _presetCacheTime > 1.0)
+            if (_presetCache == null || AppHost.TimeSinceStartup() - _presetCacheTime > 1.0)
             {
                 _presetCache = GradePresetStore.List();
-                _presetCacheTime = EditorApplication.timeSinceStartup;
+                _presetCacheTime = AppHost.TimeSinceStartup();
             }
 
-            EditorGUILayout.BeginHorizontal();
-            _newPresetName = EditorGUILayout.TextField(_newPresetName);
-            using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_newPresetName)))
+            GUILayout.BeginHorizontal();
+            _newPresetName = G.TextField(_newPresetName);
+            using (G.Disabled(string.IsNullOrWhiteSpace(_newPresetName)))
             {
                 if (GUILayout.Button("存为新预设", GUILayout.Width(88f)))
                 {
                     if (GradePresetStore.Save(_newPresetName.Trim(), s))
                     {
-                        AssetDatabase.Refresh();
+                        G.AssetsChanged();
                         _presetCache = null;
                         _newPresetName = "";
                     }
                 }
             }
-            EditorGUILayout.EndHorizontal();
+            GUILayout.EndHorizontal();
 
             if (_presetCache.Count == 0)
             {
-                EditorGUILayout.HelpBox("还没有预设。调好之后在上面起个名字存一个。", MessageType.None);
+                G.HelpBox("还没有预设。调好之后在上面起个名字存一个。", GuiMsg.None);
                 return;
             }
 
             foreach (var name in _presetCache)
             {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(name);
+                GUILayout.BeginHorizontal();
+                G.Label(name);
 
                 if (GUILayout.Button("载入", GUILayout.Width(46f)))
                 {
@@ -289,27 +297,27 @@ namespace Love.EditorTools
                 }
                 if (GUILayout.Button("覆盖", GUILayout.Width(46f)))
                 {
-                    if (EditorUtility.DisplayDialog("预设库", $"用当前参数覆盖「{name}」？", "覆盖", "取消"))
+                    if (G.Confirm("预设库", $"用当前参数覆盖「{name}」？", "覆盖", "取消"))
                     {
                         GradePresetStore.Save(name, s);
-                        AssetDatabase.Refresh();
+                        G.AssetsChanged();
                     }
                 }
                 if (GUILayout.Button("删", GUILayout.Width(30f)))
                 {
-                    if (EditorUtility.DisplayDialog("预设库", $"删除预设「{name}」？", "删除", "取消"))
+                    if (G.Confirm("预设库", $"删除预设「{name}」？", "删除", "取消"))
                     {
                         GradePresetStore.Delete(name);
-                        AssetDatabase.Refresh();
+                        G.AssetsChanged();
                         _presetCache = null;
                         GUIUtility.ExitGUI();   // 列表已变，本帧不能再继续遍历
                     }
                 }
-                EditorGUILayout.EndHorizontal();
+                GUILayout.EndHorizontal();
             }
 
-            EditorGUILayout.HelpBox("这些预设名可以直接填进 story.json 的 grade 字段，按剧情段自动切换。",
-                                    MessageType.None);
+            G.HelpBox("这些预设名可以直接填进 story.json 的 grade 字段，按剧情段自动切换。",
+                                    GuiMsg.None);
         }
 
         #endregion
@@ -336,11 +344,11 @@ namespace Love.EditorTools
             DrawWheelRow(s, 0, perRow, cell, gap);
             if (perRow < 4) DrawWheelRow(s, 2, perRow, cell, gap);
 
-            EditorGUILayout.Space(2f);
-            _showWheelNumbers = EditorGUILayout.ToggleLeft("显示数值（微调用）", _showWheelNumbers);
+            G.Space(2f);
+            _showWheelNumbers = G.ToggleLeft("显示数值（微调用）", _showWheelNumbers);
             if (!_showWheelNumbers) return;
 
-            EditorGUI.indentLevel++;
+            G.Indent(1);
             Slider("Lift 红", ref s.liftR, -0.3f, 0.3f);
             Slider("Lift 绿", ref s.liftG, -0.3f, 0.3f);
             Slider("Lift 蓝", ref s.liftB, -0.3f, 0.3f);
@@ -353,12 +361,12 @@ namespace Love.EditorTools
             Slider("Offset 红", ref s.offsetR, -0.2f, 0.2f);
             Slider("Offset 绿", ref s.offsetG, -0.2f, 0.2f);
             Slider("Offset 蓝", ref s.offsetB, -0.2f, 0.2f);
-            EditorGUI.indentLevel--;
+            G.Indent(-1);
         }
 
         void DrawWheelRow(VideoGradeSettings s, int startIndex, int count, float cell, float gap)
         {
-            float rowH = ColorWheelGUI.TrackBallHeight(cell) + 22f;
+            float rowH = G.TrackBallHeight(cell) + 22f;
             var row = GUILayoutUtility.GetRect(0f, rowH, GUILayout.ExpandWidth(true));
 
             for (int i = 0; i < count; i++)
@@ -374,14 +382,14 @@ namespace Love.EditorTools
         void DrawOneWheel(VideoGradeSettings s, int index, Rect cellRect)
         {
             var wheelRect = new Rect(cellRect.x, cellRect.y, cellRect.width,
-                                     ColorWheelGUI.TrackBallHeight(cellRect.width));
+                                     G.TrackBallHeight(cellRect.width));
             var masterRect = new Rect(cellRect.x, wheelRect.yMax + 3f, cellRect.width, 16f);
 
             bool changed = false;
             switch (index)
             {
                 case 0:
-                    changed = ColorWheelGUI.TrackBall(wheelRect, "Lift 暗部",
+                    changed = G.TrackBall(wheelRect, "Lift 暗部",
                         ref s.liftR, ref s.liftG, ref s.liftB, 0.3f);
                     changed |= MiniSlider(masterRect, ref s.lift, -0.3f, 0.3f);
                     break;
@@ -397,7 +405,7 @@ namespace Love.EditorTools
                     changed |= MiniSlider(masterRect, ref s.gainMaster, 0f, 2f);
                     break;
                 default:
-                    changed = ColorWheelGUI.TrackBall(wheelRect, "Offset 平移",
+                    changed = G.TrackBall(wheelRect, "Offset 平移",
                         ref s.offsetR, ref s.offsetG, ref s.offsetB, 0.2f);
                     changed |= MiniSlider(masterRect, ref s.offset, -0.2f, 0.2f);
                     break;
@@ -410,16 +418,16 @@ namespace Love.EditorTools
         bool TrackBallAroundOne(Rect rect, string label, ref float r, ref float g, ref float b, float range)
         {
             float dr = r - 1f, dg = g - 1f, db = b - 1f;
-            if (!ColorWheelGUI.TrackBall(rect, label, ref dr, ref dg, ref db, range)) return false;
+            if (!G.TrackBall(rect, label, ref dr, ref dg, ref db, range)) return false;
             r = dr + 1f; g = dg + 1f; b = db + 1f;
             return true;
         }
 
         bool MiniSlider(Rect rect, ref float value, float min, float max)
         {
-            EditorGUI.BeginChangeCheck();
+            G.BeginChange();
             float v = GUI.HorizontalSlider(rect, value, min, max);
-            if (!EditorGUI.EndChangeCheck()) return false;
+            if (!G.EndChange()) return false;
             value = v;
             return true;
         }
@@ -431,17 +439,17 @@ namespace Love.EditorTools
         void DrawCurves(VideoGradeSettings s)
         {
             Toggle("启用曲线", ref s.curveEnabled);
-            using (new EditorGUI.DisabledScope(!s.curveEnabled))
+            using (G.Disabled(!s.curveEnabled))
             {
                 CurveField("主曲线", ref s.curveMaster, Color.white);
                 CurveField("红", ref s.curveR, new Color(1f, 0.35f, 0.35f));
                 CurveField("绿", ref s.curveG, new Color(0.35f, 1f, 0.45f));
                 CurveField("蓝", ref s.curveB, new Color(0.45f, 0.6f, 1f));
 
-                EditorGUILayout.BeginHorizontal();
+                GUILayout.BeginHorizontal();
                 if (GUILayout.Button("全部拉直")) { RecordUndo("重置曲线"); ResetCurves(s); }
                 if (GUILayout.Button("经典 S 曲线")) { RecordUndo("S 曲线"); s.curveMaster = SCurve(); }
-                EditorGUILayout.EndHorizontal();
+                GUILayout.EndHorizontal();
             }
         }
 
@@ -449,9 +457,9 @@ namespace Love.EditorTools
         void SixCurveField(string label, ref AnimationCurve curve)
         {
             if (curve == null) curve = VideoGradeSettings.Flat();
-            EditorGUI.BeginChangeCheck();
-            var c = EditorGUILayout.CurveField(label, curve, new Color(0.9f, 0.8f, 0.4f), CurveRange);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            var c = G.Curve(label, curve, new Color(0.9f, 0.8f, 0.4f), CurveRange);
+            if (!G.EndChange()) return;
             RecordUndo("编辑六条曲线");
             curve = c;
         }
@@ -459,9 +467,9 @@ namespace Love.EditorTools
         void CurveField(string label, ref AnimationCurve curve, Color color)
         {
             if (curve == null) curve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
-            EditorGUI.BeginChangeCheck();
-            var c = EditorGUILayout.CurveField(label, curve, color, CurveRange);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            var c = G.Curve(label, curve, color, CurveRange);
+            if (!G.EndChange()) return;
             RecordUndo("编辑曲线");
             curve = c;
         }
@@ -485,23 +493,25 @@ namespace Love.EditorTools
 
         #region 二级校色
 
+        static readonly string[] WindowShapeNames = { "不限（整幅）", "椭圆", "矩形", "线性渐变" };
+
         void DrawSecondary(VideoGradeSettings s)
         {
             Toggle("启用二级校色", ref s.secondaryEnabled);
             if (!s.secondaryEnabled)
             {
-                EditorGUILayout.HelpBox("开启后，下面的调整只作用于 Power Window 和 HSL 限定器圈出的区域。", MessageType.None);
+                G.HelpBox("开启后，下面的调整只作用于 Power Window 和 HSL 限定器圈出的区域。", GuiMsg.None);
                 return;
             }
 
             Toggle("显示遮罩（灰度）", ref s.showMask);
             if (s.showMask)
-                EditorGUILayout.HelpBox("画面现在显示的是遮罩本身：白色是选中区域。调完记得关掉。", MessageType.Warning);
+                G.HelpBox("画面现在显示的是遮罩本身：白色是选中区域。调完记得关掉。", GuiMsg.Warning);
 
-            EditorGUILayout.LabelField("Power Window", EditorStyles.miniBoldLabel);
-            EditorGUI.BeginChangeCheck();
-            int shape = EditorGUILayout.Popup("形状", s.windowShape, new[] { "不限（整幅）", "椭圆", "矩形", "线性渐变" });
-            if (EditorGUI.EndChangeCheck()) { RecordUndo("窗口形状"); s.windowShape = shape; }
+            G.MiniBoldLabel("Power Window");
+            G.BeginChange();
+            int shape = G.Popup("形状", s.windowShape, WindowShapeNames);
+            if (G.EndChange()) { RecordUndo("窗口形状"); s.windowShape = shape; }
 
             if (s.windowShape > 0)
             {
@@ -516,17 +526,17 @@ namespace Love.EditorTools
                 Toggle("  反向（选窗口外）", ref s.windowInvert);
             }
 
-            EditorGUILayout.Space(4f);
-            EditorGUILayout.LabelField("HSL 限定器", EditorStyles.miniBoldLabel);
+            G.Space(4f);
+            G.MiniBoldLabel("HSL 限定器");
             Toggle("  启用", ref s.qualifierEnabled);
-            using (new EditorGUI.DisabledScope(!s.qualifierEnabled))
+            using (G.Disabled(!s.qualifierEnabled))
             {
                 var hueRow = GUILayoutUtility.GetRect(0f, 20f, GUILayout.ExpandWidth(true));
-                EditorGUI.LabelField(new Rect(hueRow.x, hueRow.y + 2f, EditorGUIUtility.labelWidth - 4f, 16f),
+                GUI.Label(new Rect(hueRow.x, hueRow.y + 2f, G.LabelWidth - 4f, 16f),
                                      "  色相中心");
 
-                var hueSwatch = new Rect(hueRow.x + EditorGUIUtility.labelWidth, hueRow.y + 2f, 32f, 16f);
-                ColorWheelGUI.HueOnlySwatch(hueSwatch, s.qualHueCenter, nh =>
+                var hueSwatch = new Rect(hueRow.x + G.LabelWidth, hueRow.y + 2f, 32f, 16f);
+                G.HueOnlySwatch(hueSwatch, s.qualHueCenter, nh =>
                 {
                     RecordUndo("限定器色相");
                     s.qualHueCenter = nh;
@@ -535,9 +545,9 @@ namespace Love.EditorTools
 
                 var hueSlider = new Rect(hueSwatch.xMax + 6f, hueRow.y + 2f,
                                          Mathf.Max(40f, hueRow.xMax - hueSwatch.xMax - 8f), 16f);
-                EditorGUI.BeginChangeCheck();
+                G.BeginChange();
                 float sh = GUI.HorizontalSlider(hueSlider, s.qualHueCenter, 0f, 1f);
-                if (EditorGUI.EndChangeCheck()) { RecordUndo("限定器色相"); s.qualHueCenter = sh; }
+                if (G.EndChange()) { RecordUndo("限定器色相"); s.qualHueCenter = sh; }
 
                 Slider("  色相范围", ref s.qualHueRange, 0f, 0.5f);
                 Slider("  色相柔和", ref s.qualHueSoft, 0.001f, 0.3f);
@@ -555,8 +565,8 @@ namespace Love.EditorTools
                 }
             }
 
-            EditorGUILayout.Space(4f);
-            EditorGUILayout.LabelField("遮罩内的调整", EditorStyles.miniBoldLabel);
+            G.Space(4f);
+            G.MiniBoldLabel("遮罩内的调整");
             Slider("  曝光", ref s.secExposure, -2f, 2f);
             Slider("  对比度", ref s.secContrast, 0f, 2f);
             Slider("  饱和度", ref s.secSaturation, 0f, 2f);
@@ -582,14 +592,11 @@ namespace Love.EditorTools
             // Layout 事件里 GetRect 返回的是占位矩形，那时画会画错位置
             if (Event.current.type != EventType.Repaint)
             {
-                EditorGUILayout.LabelField("在预览里拖动移动窗口，滚轮缩放", EditorStyles.miniLabel);
+                G.MiniLabel("在预览里拖动移动窗口，滚轮缩放");
                 return;
             }
 
             GUI.DrawTexture(rect, tex, ScaleMode.ScaleToFit);
-
-            Color prev = Handles.color;
-            Handles.color = new Color(1f, 0.85f, 0.2f, 0.9f);
 
             Vector2 c = new Vector2(rect.x + s.windowCenter.x * rect.width,
                                     rect.yMax - s.windowCenter.y * rect.height);
@@ -616,10 +623,9 @@ namespace Love.EditorTools
                     c.x + ox * Mathf.Cos(rot) - oy * Mathf.Sin(rot),
                     c.y + ox * Mathf.Sin(rot) + oy * Mathf.Cos(rot), 0f);
             }
-            Handles.DrawAAPolyLine(2f, pts);
-            Handles.color = prev;
+            G.PolyLine(2f, new Color(1f, 0.85f, 0.2f, 0.9f), pts);
 
-            EditorGUILayout.LabelField("在预览里拖动移动窗口，滚轮缩放", EditorStyles.miniLabel);
+            G.MiniLabel("在预览里拖动移动窗口，滚轮缩放");
         }
 
         void HandlePreviewInput(Rect rect, VideoGradeSettings s)
@@ -661,40 +667,40 @@ namespace Love.EditorTools
 
         void DrawCrop(VideoGradeSettings s)
         {
-            EditorGUILayout.BeginHorizontal();
+            GUILayout.BeginHorizontal();
             if (GUILayout.Button("逆时针 90°")) { RecordUndo("旋转"); s.rotate90 = (s.rotate90 + 3) % 4; }
             if (GUILayout.Button("顺时针 90°")) { RecordUndo("旋转"); s.rotate90 = (s.rotate90 + 1) % 4; }
-            EditorGUILayout.EndHorizontal();
+            GUILayout.EndHorizontal();
 
-            EditorGUILayout.BeginHorizontal();
+            GUILayout.BeginHorizontal();
             Toggle("水平翻转", ref s.flipH);
             Toggle("垂直翻转", ref s.flipV);
-            EditorGUILayout.EndHorizontal();
+            GUILayout.EndHorizontal();
 
             Slider("拉直", ref s.straighten, -45f, 45f);
 
-            EditorGUILayout.Space(4f);
+            G.Space(4f);
             Toggle("启用裁剪", ref s.cropEnabled);
 
-            using (new EditorGUI.DisabledScope(!s.cropEnabled))
+            using (G.Disabled(!s.cropEnabled))
             {
-                EditorGUILayout.LabelField("构图比例", EditorStyles.miniBoldLabel);
+                G.MiniBoldLabel("构图比例");
 
                 // 七个按钮一行放不下，按面板宽度折行
                 int perRow = Mathf.Max(3, Mathf.FloorToInt(PanelWidth / 66f));
                 for (int i = 0; i < AspectPresets.Length; i += perRow)
                 {
-                    EditorGUILayout.BeginHorizontal();
+                    GUILayout.BeginHorizontal();
                     for (int j = i; j < Mathf.Min(i + perRow, AspectPresets.Length); j++)
                     {
                         var preset = AspectPresets[j];
-                        if (!GUILayout.Button(preset.name, EditorStyles.miniButton)) continue;
+                        if (!GUILayout.Button(preset.name)) continue;
                         RecordUndo("裁剪比例 " + preset.name);
                         if (preset.ratio <= 0f) s.ResetCrop();
                         else ApplyAspect(s, preset.ratio);
                         s.cropEnabled = true;
                     }
-                    EditorGUILayout.EndHorizontal();
+                    GUILayout.EndHorizontal();
                 }
 
                 Slider("左边界", ref s.cropX, 0f, 0.95f);
@@ -704,12 +710,12 @@ namespace Love.EditorTools
 
                 // 出界的框渲染端会夹回去，但界面上不说一声，用户只会觉得滑条失灵
                 if (s.cropX + s.cropW > 1.0005f || s.cropY + s.cropH > 1.0005f)
-                    EditorGUILayout.HelpBox("裁剪框超出画面，渲染时会自动往回夹。", MessageType.Warning);
+                    G.HelpBox("裁剪框超出画面，渲染时会自动往回夹。", GuiMsg.Warning);
 
                 if (SourceSize.x > 0 && SourceSize.y > 0)
                 {
                     s.OutputSize(SourceSize.x, SourceSize.y, out int ow, out int oh);
-                    EditorGUILayout.LabelField("输出尺寸", ow + " × " + oh);
+                    G.Label("输出尺寸", ow + " × " + oh);
                 }
 
                 if (GUILayout.Button("重置裁剪")) { RecordUndo("重置裁剪"); s.ResetCrop(); }
@@ -745,7 +751,7 @@ namespace Love.EditorTools
         {
             Toggle("启用 HSL 混合器", ref s.hslEnabled);
 
-            using (new EditorGUI.DisabledScope(!s.hslEnabled))
+            using (G.Disabled(!s.hslEnabled))
             {
                 _hslTab = GUILayout.Toolbar(_hslTab, new[] { "色相", "饱和度", "明亮度" });
 
@@ -764,8 +770,8 @@ namespace Love.EditorTools
                     for (int i = 0; i < arr.Length; i++) arr[i] = 0f;
                 }
 
-                EditorGUILayout.HelpBox("接近中性灰的像素不受影响——那里的色相本来就是噪声，" +
-                                        "动它只会让灰墙和白衬衫染上颜色。", MessageType.None);
+                G.HelpBox("接近中性灰的像素不受影响——那里的色相本来就是噪声，" +
+                                        "动它只会让灰墙和白衬衫染上颜色。", GuiMsg.None);
             }
         }
 
@@ -778,17 +784,17 @@ namespace Love.EditorTools
         /// <summary>一行 = 色带颜色块 + 滑条。有色块就不用记「第三根是黄色」。</summary>
         void BandSlider(string name, float hue, float[] arr, int i, string what)
         {
-            var row = EditorGUILayout.GetControlRect();
+            var row = G.Row();
 
-            // GetControlRect 在 Layout 事件返回的是占位矩形，那时候画色块位置是错的
+            // Row 在 Layout 事件返回的是占位矩形，那时候画色块位置是错的
             if (Event.current.type == EventType.Repaint)
-                EditorGUI.DrawRect(new Rect(row.x, row.y + 2f, 12f, row.height - 4f),
-                                   Color.HSVToRGB(hue, 0.8f, 0.95f));
+                G.FillRect(new Rect(row.x, row.y + 2f, 12f, row.height - 4f),
+                           Color.HSVToRGB(hue, 0.8f, 0.95f));
 
             var rest = new Rect(row.x + 16f, row.y, row.width - 16f, row.height);
-            EditorGUI.BeginChangeCheck();
-            float v = EditorGUI.Slider(rest, name, arr[i], -1f, 1f);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            float v = G.SliderIn(rest, name, arr[i], -1f, 1f);
+            if (!G.EndChange()) return;
             RecordUndo("HSL " + what + "：" + name);
             arr[i] = v;
         }
@@ -836,91 +842,80 @@ namespace Love.EditorTools
         /// </summary>
         void DrawSearchBar()
         {
-            EditorGUILayout.BeginHorizontal();
+            GUILayout.BeginHorizontal();
 
-            EditorGUI.BeginChangeCheck();
-            string f = EditorGUILayout.TextField(_filter, EditorStyles.toolbarSearchField);
-            if (EditorGUI.EndChangeCheck()) _filter = f;
+            G.BeginChange();
+            string f = G.SearchField(_filter);
+            if (G.EndChange()) _filter = f;
 
-            using (new EditorGUI.DisabledScope(Filtering))
+            using (G.Disabled(Filtering))
             {
-                if (GUILayout.Button(new GUIContent("▾", "全部展开"), EditorStyles.miniButtonLeft, GUILayout.Width(22f)))
+                if (GUILayout.Button(new GUIContent("▾", "全部展开"), GUILayout.Width(22f)))
                     foreach (var g in Groups) SetFold(g.key, true);
-                if (GUILayout.Button(new GUIContent("▸", "全部折叠"), EditorStyles.miniButtonRight, GUILayout.Width(22f)))
+                if (GUILayout.Button(new GUIContent("▸", "全部折叠"), GUILayout.Width(22f)))
                     foreach (var g in Groups) SetFold(g.key, false);
             }
 
-            EditorGUILayout.EndHorizontal();
+            GUILayout.EndHorizontal();
 
             if (!Filtering) return;
 
             int hit = 0;
             foreach (var g in Groups) if (Matches(g)) hit++;
             if (hit == 0)
-                EditorGUILayout.HelpBox($"没有匹配「{_filter}」的分组。搜的是分组名和它的关键词，不是每一根滑条。",
-                                        MessageType.Info);
+                G.HelpBox($"没有匹配「{_filter}」的分组。搜的是分组名和它的关键词，不是每一根滑条。",
+                                        GuiMsg.Info);
         }
 
-        public static bool Section(bool state, string title)
-        {
-            EditorGUILayout.Space(3f);
-
-            var r = GUILayoutUtility.GetRect(GUIContent.none, GradeSkin.SectionHeader,
-                                             GUILayout.ExpandWidth(true));
-
-            // GetRect 在 Layout 事件返回的是占位矩形，那时候画色条位置是错的
-            if (Event.current.type == EventType.Repaint)
-            {
-                // 展开的组左边给一道强调色，一眼看出当前摊开了哪几组
-                GradeSkin.Line(r.x, r.y + 2f, 2f, r.height - 4f,
-                               state ? GradeSkin.Accent : GradeSkin.Grip);
-            }
-
-            var inner = new Rect(r.x + 7f, r.y, r.width - 7f, r.height);
-            return EditorGUI.Foldout(inner, state, title, true, GradeSkin.SectionHeader);
-        }
+        /// <summary>画一个分组标题。调色台自己也有几组要画，所以是公开的。</summary>
+        public bool Section(bool state, string title) => G.Section(state, title);
 
         void Slider(string label, ref float value, float min, float max)
         {
-            EditorGUI.BeginChangeCheck();
-            float v = EditorGUILayout.Slider(label, value, min, max);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            float v = G.Slider(label, value, min, max);
+            if (!G.EndChange()) return;
             RecordUndo("调色：" + label.Trim());
             value = v;
         }
 
         void Toggle(string label, ref bool value)
         {
-            EditorGUI.BeginChangeCheck();
-            bool v = EditorGUILayout.Toggle(label, value);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            bool v = G.Toggle(label, value);
+            if (!G.EndChange()) return;
             RecordUndo("调色：" + label.Trim());
             value = v;
         }
 
+        // 枚举名只取一次。Enum.GetNames 每次都新建一个数组，
+        // 而这两个下拉是每帧都要画的
+        static readonly string[] LogModeNames = Enum.GetNames(typeof(LogMode));
+        static readonly string[] TonemapNames = Enum.GetNames(typeof(TonemapMode));
+
         void EnumField(string label, ref int value)
         {
-            EditorGUI.BeginChangeCheck();
-            var mode = (TonemapMode)EditorGUILayout.EnumPopup(label, (TonemapMode)value);
-            if (!EditorGUI.EndChangeCheck()) return;
+            G.BeginChange();
+            int mode = G.Popup(label, value, TonemapNames);
+            if (!G.EndChange()) return;
             RecordUndo("调色：" + label);
-            value = (int)mode;
+            value = mode;
         }
 
         /// <summary>一行双头滑条，用来定区间。</summary>
         void MinMax(string label, ref float lo, ref float hi, float limitMin, float limitMax)
         {
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.PrefixLabel($"{label} {lo:0.00}–{hi:0.00}");
+            GUILayout.BeginHorizontal();
+            G.Label($"{label} {lo:0.00}–{hi:0.00}");
             float a = lo, b = hi;
-            EditorGUI.BeginChangeCheck();
-            EditorGUILayout.MinMaxSlider(ref a, ref b, limitMin, limitMax);
-            if (EditorGUI.EndChangeCheck())
+            G.BeginChange();
+            G.MinMaxSlider(ref a, ref b, limitMin, limitMax);
+            if (G.EndChange())
             {
                 RecordUndo("调色：" + label.Trim());
                 lo = a; hi = b;
             }
-            EditorGUILayout.EndHorizontal();
+            GUILayout.EndHorizontal();
         }
 
         /// <summary>染色行：色相滑条右边带一个实时颜色预览块，光看数字不知道调成什么颜色了。</summary>
@@ -939,11 +934,11 @@ namespace Love.EditorTools
             float hue = getHue(), strength = getStrength();
             var row = GUILayoutUtility.GetRect(0f, 20f, GUILayout.ExpandWidth(true));
 
-            var labelRect = new Rect(row.x, row.y + 2f, EditorGUIUtility.labelWidth - 4f, 16f);
-            EditorGUI.LabelField(labelRect, label);
+            var labelRect = new Rect(row.x, row.y + 2f, G.LabelWidth - 4f, 16f);
+            GUI.Label(labelRect, label);
 
-            var swatchRect = new Rect(row.x + EditorGUIUtility.labelWidth, row.y + 2f, 32f, 16f);
-            ColorWheelGUI.HueSwatch(swatchRect, hue, strength, (nh, ns) =>
+            var swatchRect = new Rect(row.x + G.LabelWidth, row.y + 2f, 32f, 16f);
+            G.HueSwatch(swatchRect, hue, strength, (nh, ns) =>
             {
                 RecordUndo("调色：" + label.Trim());
                 write(nh, ns);
@@ -952,21 +947,16 @@ namespace Love.EditorTools
 
             var sliderRect = new Rect(swatchRect.xMax + 6f, row.y + 2f,
                                       Mathf.Max(40f, row.xMax - swatchRect.xMax - 8f), 16f);
-            EditorGUI.BeginChangeCheck();
+            G.BeginChange();
             float ns2 = GUI.HorizontalSlider(sliderRect, strength, 0f, 1f);
-            if (EditorGUI.EndChangeCheck())
+            if (G.EndChange())
             {
                 RecordUndo("调色：" + label.Trim());
                 write(hue, ns2);
             }
         }
 
-        void RecordUndo(string action)
-        {
-            if (_undoTarget == null) return;
-            Undo.RecordObject(_undoTarget, action);
-            if (!EditorApplication.isPlaying) EditorUtility.SetDirty(_undoTarget);
-        }
+        void RecordUndo(string action) => G.RecordUndo(action);
 
         #endregion
     }

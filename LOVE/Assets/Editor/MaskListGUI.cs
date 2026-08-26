@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Love.Tools;
 using Love.Video;
 using UnityEditor;
 using UnityEngine;
@@ -12,7 +13,7 @@ namespace Love.EditorTools
     /// 结构照搬 Lightroom：一个蒙版组 = 若干部件（加 / 减 / 交）+ 一组自己的调整参数。
     /// 关键是「显示」那个开关——调选区时必须能看见边界，靠猜是调不出来的。
     /// </summary>
-    public class MaskListGUI
+    public class MaskListGUI : IMaskSectionGui
     {
         /// <summary>当前源图尺寸，几何部件的界面提示要用。</summary>
         public Vector2Int SourceSize { get; set; }

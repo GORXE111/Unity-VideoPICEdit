@@ -807,15 +807,42 @@ python Tools/checkruntime.py
 > **不看子进程退出码的检查是假的。** 编译器没跑起来时也没有 `error CS` 行，
 > 报出来就是"通过"——一个永远绿的检查比没有检查更糟。
 
-#### 界面：IMGUI 出包之后是能用的
+#### 参数界面两边共用一份
 
-`GUI` / `GUILayout` / `Event` / `GUIStyle` 都在 UnityEngine 里，能用；
-不能用的只有 `EditorGUILayout` / `EditorStyles` / `EditorWindow`。
-也就是说编辑器那 973 行参数界面的**结构**能沿用，要换的只是控件那一层。
+`GradeSettingsGUI`（973 行、**97 个参数控件**）现在在 `Assets/Scripts/Photo/Gui/`，
+调色台、修图台、独立程序用的是同一份源码，不是三份拷贝。
 
-而且那 973 行里，**73 个滑条全走同一个 `Slider(label, ref v, min, max)` 包装**，
-15 个 Toggle 走 `Toggle`，3 个走 `MinMax`。整套参数界面实际只经过 6~8 个包装。
-`RuntimeGui` 按同样的签名实现了一份，将来抽公共接口时两边能直接对上。
+它自己一处编辑器 API 都不碰，全走 `IGradeGui`：
+
+| 实现 | 在哪 | 控件从哪来 |
+|---|---|---|
+| `EditorGradeGui` | `Assets/Editor/` | `EditorGUILayout` / `EditorGUI` 的薄壳 |
+| `RuntimeGradeGui` | `Assets/Scripts/App/` | 纯 IMGUI，自己画 |
+
+**IMGUI 出包之后本来就能用**——`GUI` / `GUILayout` / `GUILayoutUtility` / `Event` /
+`GUIStyle` 都在 UnityEngine 里。所以布局、按钮、拖拽根本没进接口，
+只有 `EditorGUILayout` / `EditorGUI` / `EditorStyles` 这些真编辑器专有的才需要。
+
+> **编辑器那份实现必须是薄壳。** 每个方法就是原来那句调用，一行不多。
+> 抽接口是为了换实现，不是趁机改行为——这里但凡多做一点，
+> 两个窗口的手感就和以前不一样了，而那种差别很难查。
+
+加一个参数还是加一行，和以前一样：
+
+```csharp
+Slider("去朦胧", ref s.dehaze, -1f, 1f);
+```
+
+抽接口这一步是机械替换，所以用**结构比对**验的：把改前改后所有参数控件的
+「控件名 + 标签 + 字段 + 范围」抽出来逐个比——97 个控件、15 个分组，完全一致。
+编译只能保证类型对，保证不了「有没有哪根滑条被换成了别的字段」。
+
+**运行时那份做不到两件事**，界面上明说而不是给个动不了的控件：
+
+- **曲线编辑** —— 那是个完整的子窗口。运行时只把曲线画出来
+- **蒙版编辑** —— 同理。已有蒙版照常参与渲染和导出，只是改不了
+
+`IGradeGui.CanEditCurves` 就是用来让上层把这件事讲清楚的。
 
 #### 文件对话框
 
@@ -830,9 +857,9 @@ python Tools/checkruntime.py
 打开 JPG / PNG / **索尼 ARW**（复用同一份解码器）→ 缩放平移看图 →
 调 20 个常用参数 → 自动色调 → 导出 JPG / PNG。
 
-**还没搬过去的**：100+ 参数的完整面板、蒙版体系、污点修复、图片库、
-快照、AI 那两块、视频台。下一步是把 `GradeSettingsGUI` 的控件层抽成接口，
-让编辑器和独立程序共用同一份参数界面——那是投入产出比最高的一步。
+**已经搬过去的**：97 个参数控件的完整面板（见上面「参数界面两边共用一份」）。
+
+**还没搬过去的**：曲线编辑、蒙版编辑、污点修复、图片库、快照、AI 那两块、视频台。
 
 ### 几个实现约定
 
@@ -945,6 +972,6 @@ director.onStoryFinished  += () => Debug.Log("流程结束");
 ### 工具那半
 
 - **无损压缩 ARW** —— Lossless JPEG（Compression=7），A1 / A7 IV 之后的机身才有
-- **独立程序的完整界面** —— 见上面「独立程序」一节。骨架和边界都通了，
-  参数面板还是最小版；把 `GradeSettingsGUI` 的控件层抽成接口是下一步
+- **独立程序里的曲线与蒙版编辑** —— 参数面板已经共用了，这两个是完整的子界面，
+  要在 `RuntimeGradeGui` 里各造一个
 - **独立的视频台** —— 图那边先跑通，视频那边的时间轴要重做一遍

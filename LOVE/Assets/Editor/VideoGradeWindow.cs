@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using Love.Video;
+using Love.Tools;
 using UnityEditor;
 using UnityEngine;
 
@@ -31,7 +32,14 @@ namespace Love.EditorTools
         bool _foldMonitor = true;
 
         /// <summary>参数界面和修图台共用一份实现。</summary>
-        readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
+        // 控件层和参数界面分开：界面那份不认识编辑器，换个实现就能跑在独立程序里
+        readonly EditorGradeGui _guiBackend = new EditorGradeGui();
+        readonly GradeSettingsGUI _gui;
+
+        VideoGradeWindow()
+        {
+            _gui = new GradeSettingsGUI(_guiBackend);
+        }
 
         const string DefaultPresetPath = "Assets/StreamingAssets/Story/grade.json";
 
@@ -77,11 +85,12 @@ namespace Love.EditorTools
             // 参数界面和修图台共用同一份，避免 60 多个滑条维护两遍
             _gui.PreviewTexture = _target.Output;
             _gui.PanelWidth = position.width;
-            _gui.Draw(s, _target);
+            _guiBackend.UndoTarget = _target;
+            _gui.Draw(s);
             // 转盘弹窗的改动落在 OnGUI 之外，读一次让预览跟上
             if (_gui.ConsumeExternalChange()) Repaint();
 
-            _foldMonitor = GradeSettingsGUI.Section(_foldMonitor, "监看");
+            _foldMonitor = _gui.Section(_foldMonitor, "监看");
             if (_foldMonitor) DrawMonitor();
 
             EditorGUILayout.Space(8f);

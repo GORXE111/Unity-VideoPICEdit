@@ -33,6 +33,11 @@ namespace Love.App
         readonly RuntimeGui _gui = new RuntimeGui();
         readonly VideoGradeSettings _settings = new VideoGradeSettings();
 
+        // 参数面板和编辑器修图台是同一份源码（GradeSettingsGUI），
+        // 只是控件层换成了运行时实现
+        readonly RuntimeGradeGui _paramBackend = new RuntimeGradeGui();
+        GradeSettingsGUI _params;
+
         Texture2D _source;
         RenderTexture _preview;
         string _path;
@@ -45,8 +50,6 @@ namespace Love.App
         Vector2 _pan;
         bool _fit = true;
 
-        // 参数分组的展开状态
-        bool _gBasic = true, _gColor, _gDetail, _gEffect;
         Vector2 _scroll;
 
         const float PanelWidth = 320f;
@@ -54,6 +57,7 @@ namespace Love.App
         void OnEnable()
         {
             _settings.Reset();
+            _params = new GradeSettingsGUI(_paramBackend);
             if (gradeMaterial != null) _renderer = new VideoGradeRenderer(gradeMaterial);
         }
 
@@ -63,6 +67,7 @@ namespace Love.App
             _renderer = null;
             Release();
             _gui.Dispose();
+            _paramBackend.Dispose();
         }
 
         void Release()
@@ -250,51 +255,26 @@ namespace Love.App
             GUILayout.EndScrollView();
         }
 
+        /// <summary>
+        /// 这就是编辑器修图台那一份参数界面，一行没抄。
+        ///
+        /// 它经过 IGradeGui，所以同一份源码在这儿走的是 RuntimeGradeGui。
+        /// </summary>
         void DrawParams()
         {
-            var s = _settings;
+            if (_params == null || _source == null) return;
 
-            if (_gui.Group(ref _gBasic, "基础"))
-            {
-                _gui.Slider("曝光", ref s.exposure, -5f, 5f);
-                _gui.Slider("对比度", ref s.contrast, -1f, 1f);
-                _gui.Slider("高光", ref s.highlights, -1f, 1f);
-                _gui.Slider("阴影", ref s.shadows, -1f, 1f);
-                _gui.Slider("白位", ref s.outWhite, 0f, 1f);
-                _gui.Slider("黑位", ref s.outBlack, 0f, 1f);
-                _gui.Slider("中间调", ref s.levelsGamma, 0.1f, 3f);
-            }
+            _params.PanelWidth = PanelWidth - 16f;
+            _params.SourceSize = new Vector2Int(_source.width, _source.height);
+            _params.PreviewTexture = _preview;
 
-            if (_gui.Group(ref _gColor, "颜色"))
-            {
-                _gui.Slider("色温", ref s.temperature, -1f, 1f);
-                _gui.Slider("色调", ref s.tint, -1f, 1f);
-                _gui.Slider("饱和度", ref s.saturation, -1f, 1f);
-                _gui.Slider("色相", ref s.hueShift, -180f, 180f, "0.0");
-                _gui.Slider("肤色保护", ref s.skinProtect, 0f, 1f);
-            }
+            _paramBackend.BeginChange();
+            _params.Draw(_settings);
+            if (_paramBackend.EndChange() || _params.ConsumeExternalChange()) _dirty = true;
 
-            if (_gui.Group(ref _gDetail, "细节"))
-            {
-                _gui.Slider("清晰度", ref s.clarity, -1f, 1f);
-                _gui.Slider("去朦胧", ref s.dehaze, -1f, 1f);
-                _gui.Slider("纹理", ref s.texture, -1f, 1f);
-                _gui.Slider("锐化", ref s.sharpen, 0f, 2f);
-                _gui.Slider("降噪", ref s.denoise, 0f, 1f);
-            }
-
-            if (_gui.Group(ref _gEffect, "风格化"))
-            {
-                _gui.Slider("暗角", ref s.vignetteIntensity, -1f, 1f);
-                _gui.Slider("暗角柔和", ref s.vignetteSmoothness, 0.01f, 1f);
-                _gui.Slider("颗粒", ref s.grain, 0f, 1f);
-                _gui.Slider("辉光", ref s.bloomIntensity, 0f, 2f);
-                _gui.Slider("辉光阈值", ref s.bloomThreshold, 0f, 2f);
-            }
-
-            GUILayout.Space(10f);
-            _gui.Info("这是最小可用版本。编辑器修图台里那 100+ 个参数、蒙版、\n" +
-                      "修补、图片库还没搬过来——见 README「独立程序」一节。");
+            if (!_paramBackend.CanEditCurves)
+                _gui.Info("曲线和蒙版还只能在编辑器里改——那两个都是完整的子界面。\n" +
+                          "这里能看到它们的效果，参数也照常参与导出。");
         }
 
         void AutoToneNow()

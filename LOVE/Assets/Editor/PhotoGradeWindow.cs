@@ -183,7 +183,14 @@ namespace Love.EditorTools
         bool _dabbing;
 
         Vector2 _paramScroll, _filmScroll;
-        readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
+        // 控件层和参数界面分开：界面那份不认识编辑器，换个实现就能跑在独立程序里
+        readonly EditorGradeGui _guiBackend = new EditorGradeGui();
+        readonly GradeSettingsGUI _gui;
+
+        PhotoGradeWindow()
+        {
+            _gui = new GradeSettingsGUI(_guiBackend);
+        }
 
         void OnEnable()
         {
@@ -580,7 +587,8 @@ namespace Love.EditorTools
             _gui.PreviewTexture = _preview;
             _gui.PanelWidth = r.width - 8f;
             _gui.SourceSize = _full != null ? new Vector2Int(_full.width, _full.height) : Vector2Int.zero;
-            _gui.Draw(_settings, this);
+            _guiBackend.UndoTarget = this;
+            _gui.Draw(_settings);
             // 只有参数真的动了才重渲染。缩放平移不该触发全分辨率重算。
             // 转盘弹窗是跨帧的，改动落在 OnGUI 之外，BeginChangeCheck 捕捉不到，所以要单独问一次
             bool changed = EditorGUI.EndChangeCheck();

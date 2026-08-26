@@ -106,7 +106,14 @@ namespace Love.EditorTools
 
         readonly GradeCanvas _canvas = new GradeCanvas();
         readonly MaskOverlay _maskOverlay = new MaskOverlay();
-        readonly GradeSettingsGUI _gui = new GradeSettingsGUI();
+        // 控件层和参数界面分开：界面那份不认识编辑器，换个实现就能跑在独立程序里
+        readonly EditorGradeGui _guiBackend = new EditorGradeGui();
+        readonly GradeSettingsGUI _gui;
+
+        VideoStationWindow()
+        {
+            _gui = new GradeSettingsGUI(_guiBackend);
+        }
         Vector2 _paramScroll;
 
         float _rightPanelW = DefaultPanelW;
@@ -901,7 +908,8 @@ namespace Love.EditorTools
             _gui.PreviewTexture = _preview;
             _gui.PanelWidth = r.width - 8f;
             _gui.SourceSize = new Vector2Int(Mathf.Max(1, _srcW), Mathf.Max(1, _srcH));
-            _gui.Draw(_settings, this);
+            _guiBackend.UndoTarget = this;
+            _gui.Draw(_settings);
             // 转盘弹窗是跨帧的，改动落在 OnGUI 之外，BeginChangeCheck 捕捉不到
             if (EditorGUI.EndChangeCheck() | _gui.ConsumeExternalChange()) _dirty = true;
 
