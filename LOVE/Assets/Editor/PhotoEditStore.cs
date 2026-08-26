@@ -6,6 +6,78 @@ using UnityEngine;
 
 namespace Love.EditorTools
 {
+    /// <summary>一份存档。存的是整套参数，恢复就是原样盖回去。</summary>
+    [Serializable]
+    public class GradeSnapshot
+    {
+        public string name;
+        public long time;        // DateTime.Ticks
+        public bool auto;        // true = 覆盖性操作之前自动存的
+        public VideoGradeSettings settings;
+
+        public string TimeText
+        {
+            get
+            {
+                try { return new DateTime(time).ToString("MM-dd HH:mm"); }
+                catch { return ""; }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 快照列表的增删和淘汰。
+    ///
+    /// 单拎出来是因为淘汰规则有点绕（手动的比自动的金贵），而这种规则错了
+    /// 表现是"我存的那份不见了"——用户会以为工具吃了他的东西。正好它没有 Unity
+    /// 依赖，可以离线测。
+    /// </summary>
+    public static class Snapshots
+    {
+        /// <summary>每张图最多留多少份。再多就该用预设库了。</summary>
+        public const int MaxPerPhoto = 24;
+
+        public static GradeSnapshot Add(List<GradeSnapshot> list, VideoGradeSettings s,
+                                        string name, bool auto, DateTime now)
+        {
+            if (list == null || s == null) return null;
+
+            var snap = new GradeSnapshot
+            {
+                name = string.IsNullOrEmpty(name) ? (auto ? "自动" : "快照") : name,
+                time = now.Ticks,
+                auto = auto,
+                settings = s.Clone(),
+            };
+
+            list.Add(snap);
+            Evict(list);
+            return snap;
+        }
+
+        /// <summary>
+        /// 满了先挤自动存的，最老的先走。全是手动的才动手动的。
+        ///
+        /// 反过来的话，用户手起的"暖调版"会被一串自动快照挤掉——
+        /// 那是他真正在意的那一份。
+        /// </summary>
+        static void Evict(List<GradeSnapshot> list)
+        {
+            while (list.Count > MaxPerPhoto)
+            {
+                int victim = -1;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (!list[i].auto) continue;
+                    victim = i;
+                    break;      // 列表按时间递增，第一个自动的就是最老的自动的
+                }
+                if (victim < 0) victim = 0;
+                list.RemoveAt(victim);
+            }
+        }
+    }
+
     /// <summary>一张图的全部编辑记录。</summary>
     [Serializable]
     public class PhotoEdit
@@ -25,6 +97,7 @@ namespace Love.EditorTools
 
         public VideoGradeSettings settings;
         public List<RepairSpot> repairs = new List<RepairSpot>();
+        public List<GradeSnapshot> snapshots = new List<GradeSnapshot>();
     }
 
     /// <summary>
@@ -89,6 +162,7 @@ namespace Love.EditorTools
                 {
                     if (it == null || string.IsNullOrEmpty(it.path)) continue;
                     if (it.repairs == null) it.repairs = new List<RepairSpot>();
+                    if (it.snapshots == null) it.snapshots = new List<GradeSnapshot>();
                     if (!it.hasSettings) it.settings = null;
                     // 老文件里可能没有 maskGroups 这类后加的字段，补齐一下防 null
                     it.settings?.MigrateSecondary();
@@ -139,7 +213,8 @@ namespace Love.EditorTools
 
         static bool IsEmpty(PhotoEdit e) =>
             e.rating == 0 && e.flag == 0 && !e.hasSettings &&
-            (e.repairs == null || e.repairs.Count == 0);
+            (e.repairs == null || e.repairs.Count == 0) &&
+            (e.snapshots == null || e.snapshots.Count == 0);
 
         static double EditorTime() =>
 #if UNITY_EDITOR

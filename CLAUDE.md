@@ -144,7 +144,8 @@ MaskBrush.shader     手绘笔刷，靠 BlendOp Max/Min 直接画进蒙版
 GradeMask            蒙版组与部件的数据（Lightroom 那套结构）
 ImageRepair          污点修复 / 仿制图章（编辑器侧），修补记录可重放
 PhotoLibrary         图片库：排序 / 筛选 / 评级 / 多选，纯逻辑无 GUI 依赖
-PhotoEditStore       逐图的参数 / 修补 / 评级落盘到 UserSettings/
+PhotoEditStore       逐图的参数 / 修补 / 评级 / 快照落盘到 UserSettings/
+ExportPreset         导出配置 + 命名 / 尺寸 / 重名的纯逻辑（可离线测）
 ImageRepair.shader   修补一处：仿制 + 色调补偿
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）

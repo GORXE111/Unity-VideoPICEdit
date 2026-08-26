@@ -66,6 +66,11 @@ namespace Love.EditorTools
         readonly PhotoEditStore _store = new PhotoEditStore();
         VideoGradeSettings _clipboard;
         [SerializeField] AutoTone.Options _autoOpt = AutoTone.Options.Default;
+
+        // 上一次存快照之后参数有没有动过。没动过就别在覆盖性操作前再存一份，
+        // 否则连点两次「重置」会攒出两份一模一样的
+        bool _snapChanged;
+        string _newSnapName = "";
         string _loadedPath;
         readonly List<string> _pendingImports = new List<string>();
         int _pendingSelect = -1;
@@ -429,6 +434,7 @@ namespace Love.EditorTools
 
             _tb.Button("胶片化", 50f, () =>
             {
+                AutoSnapshot("胶片化之前");
                 Undo.RecordObject(this, "胶片化预设");
                 _settings.ApplyFilmLook();
                 _dirty = true;
@@ -438,6 +444,7 @@ namespace Love.EditorTools
 
             _tb.Button("重置参数", 62f, () =>
             {
+                AutoSnapshot("重置之前");
                 Undo.RecordObject(this, "重置参数");
                 _settings.Reset();
                 _dirty = true;
@@ -506,6 +513,8 @@ namespace Love.EditorTools
 
             DrawMaskBar();
             EditorGUILayout.Space(8f);
+            DrawSnapshotBar();
+            EditorGUILayout.Space(8f);
             DrawSyncBar();
             EditorGUILayout.Space(8f);
             DrawAutoToneBar();
@@ -533,7 +542,7 @@ namespace Love.EditorTools
             // 只有参数真的动了才重渲染。缩放平移不该触发全分辨率重算。
             // 转盘弹窗是跨帧的，改动落在 OnGUI 之外，BeginChangeCheck 捕捉不到，所以要单独问一次
             bool changed = EditorGUI.EndChangeCheck();
-            if (changed | _gui.ConsumeExternalChange()) _dirty = true;
+            if (changed | _gui.ConsumeExternalChange()) { _dirty = true; _snapChanged = true; }
 
             EditorGUILayout.EndScrollView();
 
@@ -755,6 +764,118 @@ namespace Love.EditorTools
             _dirty = true;
         }
 
+        #region 快照
+
+        /// <summary>
+        /// 覆盖性操作之前留一份。
+        ///
+        /// Unity 的 Ctrl+Z 是会话级的，程序集一重载就没了；而这些操作
+        /// （重置、套预设、自动色调、粘贴）一下就把整套参数换掉。
+        /// 存一份的成本是几 KB，找不回来的成本是重调一遍。
+        /// </summary>
+        void AutoSnapshot(string label)
+        {
+            if (_lib.Current == null || !_snapChanged) return;
+            var rec = _store.GetOrCreate(_lib.Current.path);
+            Snapshots.Add(rec.snapshots, _settings, label, true, DateTime.Now);
+            _store.MarkDirty();
+            _snapChanged = false;
+        }
+
+        void TakeSnapshot(string name)
+        {
+            if (_lib.Current == null) return;
+            var rec = _store.GetOrCreate(_lib.Current.path);
+            Snapshots.Add(rec.snapshots, _settings, name, false, DateTime.Now);
+            _store.MarkDirty();
+            _snapChanged = false;
+            Repaint();
+        }
+
+        void RestoreSnapshot(GradeSnapshot snap)
+        {
+            if (snap?.settings == null) return;
+
+            // 恢复本身也是覆盖性的，先把现在这套留住
+            AutoSnapshot("恢复之前");
+
+            Undo.RecordObject(this, "恢复快照");
+            _settings.CopyFrom(snap.settings);
+            StashSettings();
+            _dirty = true;
+            _snapChanged = false;
+            Repaint();
+        }
+
+        void DrawSnapshotBar()
+        {
+            EditorGUILayout.LabelField("快照", EditorStyles.boldLabel);
+
+            var rec = _lib.Current != null ? _store.Get(_lib.Current.path) : null;
+            var list = rec?.snapshots;
+
+            EditorGUILayout.BeginHorizontal();
+            _newSnapName = EditorGUILayout.TextField(_newSnapName);
+            using (new EditorGUI.DisabledScope(_lib.Current == null))
+                if (GUILayout.Button("存一份", EditorStyles.miniButton, GUILayout.Width(56f)))
+                {
+                    TakeSnapshot(string.IsNullOrWhiteSpace(_newSnapName)
+                        ? "快照 " + DateTime.Now.ToString("HH:mm:ss") : _newSnapName.Trim());
+                    _newSnapName = "";
+                    GUI.FocusControl(null);
+                }
+            EditorGUILayout.EndHorizontal();
+
+            if (list == null || list.Count == 0)
+            {
+                EditorGUILayout.HelpBox("还没有快照。重置、套预设、自动色调、粘贴这些覆盖性操作之前会自动存一份，" +
+                                        "也可以在这里手动存。跟着逐图记录一起落盘，重启也还在。",
+                                        MessageType.None);
+                return;
+            }
+
+            // 新的在上面：刚存的那份最可能马上要用
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                var snap = list[i];
+                var row = EditorGUILayout.GetControlRect(GUILayout.Height(18f));
+
+                if (Event.current.type == EventType.Repaint && snap.auto)
+                    EditorGUI.DrawRect(row, new Color(1f, 1f, 1f, 0.03f));
+
+                float x = row.x;
+                // 自动存的用一道灰色条区分，手动存的用强调色——手动的才是用户真正在意的
+                GradeSkin.Line(x, row.y + 2f, 2f, row.height - 4f,
+                               snap.auto ? GradeSkin.Grip : GradeSkin.Accent);
+                x += 6f;
+
+                EditorGUI.BeginChangeCheck();
+                string nm = EditorGUI.TextField(new Rect(x, row.y, row.width - 160f, 17f), snap.name);
+                if (EditorGUI.EndChangeCheck()) { snap.name = nm; _store.MarkDirty(); }
+                x = row.xMax - 152f;
+
+                GUI.Label(new Rect(x, row.y, 76f, 17f), snap.TimeText, EditorStyles.miniLabel);
+                x += 78f;
+
+                if (GUI.Button(new Rect(x, row.y, 48f, 17f), "恢复", EditorStyles.miniButton))
+                    RestoreSnapshot(snap);
+                x += 50f;
+
+                if (GUI.Button(new Rect(x, row.y, 22f, 17f), "×", EditorStyles.miniButton))
+                {
+                    list.RemoveAt(i);
+                    _store.MarkDirty();
+                    Repaint();
+                }
+            }
+
+            EditorGUILayout.LabelField(
+                $"{list.Count} / {Snapshots.MaxPerPhoto} 份　满了先挤最老的自动快照",
+                EditorStyles.miniLabel);
+        }
+
+        #endregion
+
         /// <summary>
         /// 参数的复制 / 粘贴 / 同步。
         ///
@@ -773,6 +894,7 @@ namespace Love.EditorTools
             using (new EditorGUI.DisabledScope(_clipboard == null || _full == null))
                 if (GUILayout.Button(new GUIContent("粘贴", "套到当前这张")))
                 {
+                    AutoSnapshot("粘贴之前");
                     Undo.RecordObject(this, "粘贴参数");
                     _settings.CopyFrom(_clipboard);
                     StashSettings();
@@ -1289,6 +1411,9 @@ namespace Love.EditorTools
             _repair.InvalidateProbe();
             _cloneSource = null;
             _repairDirty = true;
+
+            // 换图要复位「改过没」，否则上一张的改动会让这一张也存一份冗余快照
+            _snapChanged = false;
 
             _canvas.FitPending = true;
             _dirty = true;
@@ -2078,6 +2203,7 @@ namespace Love.EditorTools
             var px = AnalysisPixels(_lib.Current);
             if (px == null) return;
 
+            AutoSnapshot("自动色调之前");
             Undo.RecordObject(this, "自动色调");
             AutoTone.Apply(AutoTone.Analyze(px), _settings, _autoOpt);
             StashSettings();
@@ -2509,6 +2635,7 @@ namespace Love.EditorTools
             {
                 var pp = FindObjectOfType<VideoPostProcessor>();
                 if (pp == null) { Debug.LogWarning("[修图台] 场景里没有 VideoPostProcessor"); return; }
+                AutoSnapshot("覆盖之前");
                 Undo.RecordObject(this, "复制调色参数");
                 _settings.CopyFrom(pp.settings);
                 _dirty = true;
@@ -2519,6 +2646,7 @@ namespace Love.EditorTools
                 if (string.IsNullOrEmpty(path)) return;
                 var loaded = VideoGradeSettings.FromJson(File.ReadAllText(path, System.Text.Encoding.UTF8));
                 if (loaded == null) return;
+                AutoSnapshot("载入预设之前");
                 Undo.RecordObject(this, "载入预设");
                 _settings.CopyFrom(loaded);
                 _dirty = true;
