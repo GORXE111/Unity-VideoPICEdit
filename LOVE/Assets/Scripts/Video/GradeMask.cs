@@ -15,6 +15,7 @@ namespace Love.Video
         DepthRange = 5,       // 按深度圈一块，需要深度图
         Subject = 6,          // AI 主体分割
         Brush = 7,            // 手绘
+        Sky = 8,              // 天空。从顶边漫延出来的，不是 AI
     }
 
     /// <summary>部件之间怎么合。第一个部件恒按「加」处理——总得先有东西才谈得上减和交。</summary>
@@ -144,6 +145,14 @@ namespace Love.Video
                 center = new Vector2(0.5f, 0.75f),
                 size = new Vector2(0.5f, 0.25f),
             });
+            return g;
+        }
+
+        /// <summary>天空蒙版。压蓝天、救过曝的白天空，这是最常用的一个。</summary>
+        public static MaskGroup SkyMask(string name = "天空")
+        {
+            var g = new MaskGroup { name = name };
+            g.parts.Add(new MaskPart { shape = (int)MaskShape.Sky });
             return g;
         }
 

@@ -106,6 +106,39 @@ static class ExportTest
         string f = ExportNaming.Resolve("D:/out", "old", ".jpg", 2, new HashSet<string>(), exists);
         True(f == null, "跳过模式返回 null");
 
+        // ---- 水印摆位 ----
+        // 四个角的正负号最容易写反，而写反了只有出图才看得见
+        void Corner(int c, float wx, float wy, string what)
+        {
+            var r = ExportNaming.WatermarkRect(2000, 1000, 200f, 50f, c, 0.03f);
+            True(Math.Abs(r.x - wx) < 0.01f && Math.Abs(r.y - wy) < 0.01f,
+                 what + $"（得到 {r.x},{r.y}）");
+        }
+
+        // 长边 2000 × 3% = 60
+        Corner(0, 60f, 60f, "左上");
+        Corner(1, 2000f - 200f - 60f, 60f, "右上");
+        Corner(2, 60f, 1000f - 50f - 60f, "左下");
+        Corner(3, 2000f - 200f - 60f, 1000f - 50f - 60f, "右下");
+
+        var r0 = ExportNaming.WatermarkRect(2000, 1000, 200f, 50f, 0, 0f);
+        True(r0.x == 0f && r0.y == 0f, "边距为 0 时贴着角");
+
+        // 边距按长边算，两个方向同一个绝对值——按各自边长算的话
+        // 横图上下会比左右窄一半，看着就是"没对齐"
+        var r1 = ExportNaming.WatermarkRect(2000, 1000, 200f, 50f, 0, 0.05f);
+        True(Math.Abs(r1.x - r1.y) < 0.01f, $"横图上下左右的边距一样宽（{r1.x} vs {r1.y}）");
+
+        var r2 = ExportNaming.WatermarkRect(1000, 2000, 200f, 50f, 0, 0.05f);
+        True(Math.Abs(r2.x - 100f) < 0.01f, $"竖图也按长边算边距（得到 {r2.x}）");
+
+        var r3 = ExportNaming.WatermarkRect(2000, 1000, 200f, 50f, 0, 5f);
+        True(r3.x <= 2000f, "边距给个离谱的值也不会算飞");
+
+        // 水印比画面还大时会算出负坐标，那是对的：宁可露出一部分，也别悄悄挪位置
+        var r4 = ExportNaming.WatermarkRect(400, 300, 800f, 200f, 3, 0.03f);
+        True(r4.x < 0f, "水印比画面宽时靠右摆会溢出到左边（不做遮掩）");
+
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "全部通过" : ("失败 " + _fail + " 项"));
         return _fail == 0 ? 0 : 1;

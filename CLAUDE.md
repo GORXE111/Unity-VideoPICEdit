@@ -148,6 +148,9 @@ PhotoEditStore       逐图的参数 / 修补 / 评级 / 快照落盘到 UserSet
 ExportPreset         导出配置 + 命名 / 尺寸 / 重名的纯逻辑（可离线测）
 ImageRepair.shader   修补一处：仿制 + 色调补偿
 AutoTone             按直方图给一组起手曝光与色阶
+SkyDetect            天空检测：从顶边漫延，纯 CPU，可离线测
+SkyMaskBuilder       把漫延结果搬到显示空间做成贴图（编辑器侧）
+TextStamp            文字水印：字形 UV 拼四边形，GL 画进贴图
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
 SonyRawImporter      索尼 ARW 解码（编辑器侧，未压缩 + ARW2 有损压缩）
 GradeCanvas          预览画布：棋盘底 / 缩放平移 / 硬裁剪，只摆图不渲染
@@ -301,6 +304,13 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   照着规范自己写即可（和当初拒掉 GPL 的 RobustVideoMatting 是同一条线）。
 - **PlayerPrefs 会悄悄盖掉 Inspector 配置**。`AudioManager.rememberPlayerSettings` 和
   `VideoPostProcessor.loadOnStart` 关掉时才以 Inspector / 场景为准。
+- **内置的 `GUI/Text Shader` 吃不了顶点色**。它是 `Color [_Color]` + `combine primary`，
+  固定管线里那个 primary 是材质颜色，`GL.Color` 完全无效，画出来永远是材质上那个色。
+  自己渲字要配自己的材质。
+- **天空检测的亮度闸门不能用 luma**。luma 给蓝色的权重只有 0.114，深蓝天顶
+  (30,60,160) 算出来才 0.24，会被当成"太暗"整片丢掉。要用 `max(r,g,b)`。
+- **`GetPixels32` 的第一行是画面底部**。天空检测是从"顶边"往下漫延的，
+  直接把它喂进去等于从地面开始找天空，什么都找不到。和 ffmpeg 裸帧是同一类坑。
 - **渐变插值的起点要先快照**。直接拿被写入的对象当插值基准，每帧基准都在动，
   结果是一条越来越慢、永远到不了终点的曲线。
 

@@ -70,6 +70,19 @@ namespace Love.EditorTools
         // 上一次存快照之后参数有没有动过。没动过就别在覆盖性操作前再存一份，
         // 否则连点两次「重置」会攒出两份一模一样的
         bool _snapChanged;
+
+        // 字体是资产引用，不能塞进 ExportPreset——那玩意要能存成 JSON。
+        // 所以字体单独跟着窗口走，不属于导出预设的一部分
+        [SerializeField] Font _wmFont;
+
+        // 天空蒙版。漫延的结果按图缓存，贴图按「图 + 几何」缓存——
+        // 拖裁剪框时只要重搬一次，不用重新漫延
+        [SerializeField] SkyDetect.Options _skyOpt = SkyDetect.Options.Default;
+        SkyDetect.Result _skyResult;
+        string _skyDetected;
+        Texture2D _skyTex;
+        string _skyTexPath;
+        int _skyTexGeo = int.MinValue;
         string _newSnapName = "";
         string _loadedPath;
         readonly List<string> _pendingImports = new List<string>();
@@ -250,6 +263,7 @@ namespace Love.EditorTools
 
             ReleasePreview();
             ReleaseBrushes();
+            ReleaseSky();
             _repair.Dispose();
             ClearEntries();
             if (_lut != null) { DestroyImmediate(_lut); _lut = null; }
@@ -672,11 +686,124 @@ namespace Love.EditorTools
                 lutAmount = _lutAmount,
                 brushes = _brushes,
                 depthMap = CurrentMask,   // 选了 MiDaS 时生成的就是深度图，和主体蒙版共用一张
+                skyMask = EnsureSky(),
             });
 
             _settings.cropEnabled = prevCrop;
             _dirty = false;
         }
+
+        #region 天空蒙版
+
+        /// <summary>有没有哪个还开着的蒙版组用到了天空。没人用就一点活都别干。</summary>
+        bool NeedsSky()
+        {
+            var gs = _settings != null ? _settings.maskGroups : null;
+            if (gs == null) return false;
+
+            for (int i = 0; i < gs.Count; i++)
+            {
+                var g = gs[i];
+                if (g == null || !g.enabled || g.parts == null) continue;
+                for (int j = 0; j < g.parts.Count; j++)
+                    if (g.parts[j] != null && g.parts[j].Shape == MaskShape.Sky) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 取当前这张的天空蒙版，必要时算一遍。
+        ///
+        /// 只在 Update 里调：GetPixels32 和 SetPixels32 都不便宜，
+        /// 而且这条路最终要产出一张贴图给渲染用，OnGUI 里碰不得。
+        /// </summary>
+        Texture2D EnsureSky()
+        {
+            var e = _lib.Current;
+            if (e == null || e.thumb == null || !NeedsSky())
+            {
+                _gui.Masks.HasSky = false;
+                return null;
+            }
+
+            if (_skyDetected != e.path)
+            {
+                _skyResult = SkyMaskBuilder.Detect(e.thumb, _skyOpt);
+                _skyDetected = e.path;
+                ReleaseSkyTexture();
+            }
+
+            _gui.Masks.HasSky = _skyResult.found;
+            _gui.Masks.SkyCoverage = _skyResult.coverage;
+            if (!_skyResult.found) return null;
+
+            int geo = SkyMaskBuilder.GeometryKey(_settings);
+            if (_skyTex != null && _skyTexPath == e.path && _skyTexGeo == geo) return _skyTex;
+
+            ReleaseSkyTexture();
+            _skyTex = SkyMaskBuilder.ToTexture(_skyResult, _settings);
+            _skyTexPath = e.path;
+            _skyTexGeo = geo;
+            return _skyTex;
+        }
+
+        void ReleaseSkyTexture()
+        {
+            if (_skyTex != null) { DestroyImmediate(_skyTex); _skyTex = null; }
+            _skyTexPath = null;
+            _skyTexGeo = int.MinValue;
+        }
+
+        void ReleaseSky()
+        {
+            ReleaseSkyTexture();
+            _skyResult = default;
+            _skyDetected = null;
+        }
+
+        /// <summary>
+        /// 批量导出别的图时现算一张。
+        ///
+        /// 和 AI 主体蒙版不同，天空是能逐图便宜地算出来的，所以批量导出时也照算——
+        /// 否则"压天空"这套参数套到整批图上会悄悄什么都不做，那比报错还难查。
+        /// </summary>
+        Texture2D BuildSkyFor(Texture2D src)
+        {
+            if (src == null || !NeedsSky()) return null;
+
+            // GetPixels32 在大图上是内存炸弹，先缩到工作尺寸再回读
+            int max = Mathf.Max(src.width, src.height);
+            Texture2D small = src;
+            RenderTexture rt = null;
+            Texture2D tmp = null;
+
+            if (max > 512)
+            {
+                float k = 512f / max;
+                int w = Mathf.Max(4, Mathf.RoundToInt(src.width * k));
+                int h = Mathf.Max(4, Mathf.RoundToInt(src.height * k));
+                rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(src, rt);
+
+                tmp = new Texture2D(w, h, TextureFormat.RGBA32, false, true)
+                    { hideFlags = HideFlags.HideAndDontSave };
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                tmp.ReadPixels(new Rect(0f, 0f, w, h), 0, 0, false);
+                tmp.Apply(false, false);
+                RenderTexture.active = prev;
+                small = tmp;
+            }
+
+            var res = SkyMaskBuilder.Detect(small, _skyOpt);
+            var tex = SkyMaskBuilder.ToTexture(res, _settings);
+
+            if (rt != null) RenderTexture.ReleaseTemporary(rt);
+            if (tmp != null) DestroyImmediate(tmp);
+            return tex;
+        }
+
+        #endregion
 
         void ReleaseBrushes()
         {
@@ -1414,6 +1541,7 @@ namespace Love.EditorTools
 
             // 换图要复位「改过没」，否则上一张的改动会让这一张也存一份冗余快照
             _snapChanged = false;
+            ReleaseSky();
 
             _canvas.FitPending = true;
             _dirty = true;
@@ -2295,6 +2423,7 @@ namespace Love.EditorTools
         string _watermarkLoaded;
 
         static readonly string[] CornerNames = { "左上", "右上", "左下", "右下" };
+        static readonly string[] WmModeNames = { "图片", "文字" };
         static readonly string[] CollisionNames = { "自动加序号", "直接覆盖", "跳过" };
 
         void DrawExportBar()
@@ -2379,25 +2508,49 @@ namespace Love.EditorTools
         {
             EditorGUI.indentLevel++;
 
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("图片", string.IsNullOrEmpty(_export.watermarkPath)
-                ? "（未选）" : Path.GetFileName(_export.watermarkPath));
-            if (GUILayout.Button("选择…", EditorStyles.miniButton, GUILayout.Width(50f)))
+            _export.wmMode = GUILayout.Toolbar(_export.wmMode, WmModeNames);
+
+            if (_export.wmMode == 0)
             {
-                string p = EditorUtility.OpenFilePanel("选择水印图片（建议带透明通道的 PNG）", "", "png,jpg");
-                if (!string.IsNullOrEmpty(p)) { _export.watermarkPath = p; ReleaseWatermark(); }
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField("图片", string.IsNullOrEmpty(_export.watermarkPath)
+                    ? "（未选）" : Path.GetFileName(_export.watermarkPath));
+                if (GUILayout.Button("选择…", EditorStyles.miniButton, GUILayout.Width(50f)))
+                {
+                    string p = EditorUtility.OpenFilePanel("选择水印图片（建议带透明通道的 PNG）", "", "png,jpg");
+                    if (!string.IsNullOrEmpty(p)) { _export.watermarkPath = p; ReleaseWatermark(); }
+                }
+                EditorGUILayout.EndHorizontal();
+
+                _export.wmScale = EditorGUILayout.Slider(
+                    new GUIContent("大小", "相对输出画面的长边"), _export.wmScale, 0.02f, 0.6f);
             }
-            EditorGUILayout.EndHorizontal();
+            else
+            {
+                _export.wmText = EditorGUILayout.TextField("文字", _export.wmText);
+
+                _wmFont = (Font)EditorGUILayout.ObjectField(
+                    new GUIContent("字体", "留空用系统自带的。要打中文得指定一个中文字体"),
+                    _wmFont, typeof(Font), false);
+
+                _export.wmFontScale = EditorGUILayout.Slider(
+                    new GUIContent("字号", "相对输出画面的长边"), _export.wmFontScale, 0.008f, 0.2f);
+                _export.wmColor = EditorGUILayout.ColorField("颜色", _export.wmColor);
+                _export.wmOutline = EditorGUILayout.Slider(
+                    new GUIContent("描边", "相对字号。亮底上的白字不描边基本看不见"),
+                    _export.wmOutline, 0f, 0.3f);
+            }
 
             _export.corner = EditorGUILayout.Popup(new GUIContent("位置"), _export.corner, CornerNames);
-            _export.wmScale = EditorGUILayout.Slider(
-                new GUIContent("大小", "相对输出画面的长边"), _export.wmScale, 0.02f, 0.6f);
             _export.wmMargin = EditorGUILayout.Slider("边距", _export.wmMargin, 0f, 0.2f);
             _export.wmOpacity = EditorGUILayout.Slider("不透明度", _export.wmOpacity, 0.05f, 1f);
 
-            if (string.IsNullOrEmpty(_export.watermarkPath))
-                EditorGUILayout.HelpBox("只支持图片水印。文字水印要在没有 OnGUI 的地方把字渲进贴图，" +
-                                        "编辑器里没有干净的做法。", MessageType.None);
+            if (_export.wmMode == 0 && string.IsNullOrEmpty(_export.watermarkPath))
+                EditorGUILayout.HelpBox("还没选水印图片。建议用带透明通道的 PNG。", MessageType.None);
+            else if (_export.wmMode == 1 && _wmFont != null && !_wmFont.dynamic)
+                EditorGUILayout.HelpBox("「" + _wmFont.name + "」是静态图集字体，只有烘焙进去的那些字能出来，" +
+                                        "字号也是缩放上去的、会糊。中文水印建议用 Dynamic 模式的字体。",
+                                        MessageType.Warning);
 
             EditorGUI.indentLevel--;
         }
@@ -2559,6 +2712,12 @@ namespace Love.EditorTools
                 opts.lut = _lut;
                 opts.lutAmount = _lutAmount;
                 opts.brushes = _brushes;
+
+                // 天空能逐图现算，所以批量导出时也照算，不像 AI 蒙版那样只认当前这张
+                Texture2D skyTmp = null;
+                if (isCurrent) opts.skyMask = EnsureSky();
+                else { skyTmp = BuildSkyFor(tex); opts.skyMask = skyTmp; }
+
                 r.Render(isCurrent ? GradeSource : tex, graded, _settings, opts);
 
                 RenderTexture target = graded;
@@ -2577,6 +2736,8 @@ namespace Love.EditorTools
                 readback.ReadPixels(new Rect(0f, 0f, ew, eh), 0, 0, false);
                 readback.Apply(false, false);
                 RenderTexture.active = prev;
+
+                if (skyTmp != null) DestroyImmediate(skyTmp);
 
                 byte[] bytes = _export.jpg ? readback.EncodeToJPG(_export.jpgQuality) : readback.EncodeToPNG();
                 string dir = Path.GetDirectoryName(path);
@@ -2602,24 +2763,67 @@ namespace Love.EditorTools
         /// <summary>把水印贴到目标上。用 Graphics.DrawTexture 走内置的带 alpha 混合的材质，省一个 shader。</summary>
         void StampWatermark(RenderTexture target)
         {
+            if (target == null) return;
+
+            // 两种水印共用一套摆位：LoadPixelMatrix 之后原点在左上、y 向下
+            if (_export.wmMode == 1) StampText(target);
+            else StampImage(target);
+        }
+
+        void StampImage(RenderTexture target)
+        {
             var wm = Watermark;
-            if (wm == null || target == null) return;
+            if (wm == null) return;
 
             float longEdge = Mathf.Max(target.width, target.height);
             float w = longEdge * Mathf.Clamp(_export.wmScale, 0.01f, 1f);
             float h = w * wm.height / Mathf.Max(wm.width, 1);
-            float m = longEdge * Mathf.Clamp01(_export.wmMargin);
 
-            // LoadPixelMatrix 之后原点在左上，和 DrawTexture 的约定一致
-            float x = (_export.corner == 0 || _export.corner == 2) ? m : target.width - w - m;
-            float y = (_export.corner == 0 || _export.corner == 1) ? m : target.height - h - m;
+            var r = ExportNaming.WatermarkRect(target.width, target.height, w, h,
+                                               _export.corner, _export.wmMargin);
 
             var prev = RenderTexture.active;
             RenderTexture.active = target;
             GL.PushMatrix();
             GL.LoadPixelMatrix(0f, target.width, target.height, 0f);
-            Graphics.DrawTexture(new Rect(x, y, w, h), wm, new Rect(0f, 0f, 1f, 1f),
+            Graphics.DrawTexture(r, wm, new Rect(0f, 0f, 1f, 1f),
                                  0, 0, 0, 0, new Color(1f, 1f, 1f, Mathf.Clamp01(_export.wmOpacity)));
+            GL.PopMatrix();
+            RenderTexture.active = prev;
+        }
+
+        void StampText(RenderTexture target)
+        {
+            if (string.IsNullOrWhiteSpace(_export.wmText)) return;
+
+            var font = _wmFont != null ? _wmFont : TextStamp.DefaultFont;
+            if (font == null) return;
+
+            float longEdge = Mathf.Max(target.width, target.height);
+
+            // 字号按输出长边算，这样一批图缩到不同尺寸时水印的视觉大小是一致的。
+            // 上限拦一下：动态字体图集是有大小的，字号给到几千会把图集撑爆、字反而丢
+            int px = Mathf.Clamp(
+                Mathf.RoundToInt(longEdge * Mathf.Clamp(_export.wmFontScale, 0.004f, 0.5f)), 8, 512);
+
+            var lay = TextStamp.Measure(font, _export.wmText, px);
+            if (lay.Empty) return;
+
+            float outline = px * Mathf.Clamp01(_export.wmOutline);
+
+            // 描边是往外扩的，量外框时要把它算进去，否则贴着角的那半圈会被裁掉
+            var r = ExportNaming.WatermarkRect(target.width, target.height,
+                                               lay.size.x + outline * 2f, lay.size.y + outline * 2f,
+                                               _export.corner, _export.wmMargin);
+
+            var c = _export.wmColor;
+            c.a *= Mathf.Clamp01(_export.wmOpacity);
+
+            var prev = RenderTexture.active;
+            RenderTexture.active = target;
+            GL.PushMatrix();
+            GL.LoadPixelMatrix(0f, target.width, target.height, 0f);
+            TextStamp.Draw(lay, font, new Vector2(r.x + outline, r.y + outline), c, outline);
             GL.PopMatrix();
             RenderTexture.active = prev;
         }

@@ -20,6 +20,12 @@ namespace Love.EditorTools
         /// <summary>有没有可用的 AI 主体蒙版。没有时「主体」部件会给出提示。</summary>
         public bool HasSubjectMask { get; set; }
 
+        /// <summary>当前这张图有没有算出天空。没有时界面上要说清楚，别让人对着一个不起作用的部件调半天。</summary>
+        public bool HasSky { get; set; }
+
+        /// <summary>天空占画面的比例，给界面显示用。</summary>
+        public float SkyCoverage { get; set; }
+
         /// <summary>有没有可用的深度图。</summary>
         public bool HasDepthMap { get; set; }
 
@@ -50,6 +56,7 @@ namespace Love.EditorTools
             (MaskShape.ColorRange,     "颜色范围", "按色相和饱和度圈一块，比如只调天空的蓝"),
             (MaskShape.LuminanceRange, "亮度范围", "按亮度圈一块，比如只压高光"),
             (MaskShape.DepthRange,     "深度范围", "按远近圈一块，需要先生成深度图"),
+            (MaskShape.Sky,            "天空",     "从画面顶边漫延出来，自动圈住天空。压蓝天、救白天空"),
             (MaskShape.Subject,        "AI 主体",  "分割模型抠出来的主体，需要先生成蒙版"),
         };
 
@@ -304,6 +311,17 @@ namespace Love.EditorTools
                                                 "去「AI 蒙版」里选 MiDaS 模型生成一张。", MessageType.Warning);
                     break;
 
+                case MaskShape.Sky:
+                    if (HasSky)
+                        EditorGUILayout.HelpBox($"天空占画面 {SkyCoverage * 100f:F0}%。" +
+                                                "换图或者改了裁剪 / 旋转之后会自动重算。", MessageType.None);
+                    else
+                        EditorGUILayout.HelpBox("这张图没找到天空，所以这个部件目前不选中任何东西。" +
+                                                "检测是从画面顶边往下漫延的：天空不在顶边（比如从窗户往外拍）、" +
+                                                "或者顶边全是树枝屋檐时找不到。那种情况用渐变或者画笔。",
+                                                MessageType.Warning);
+                    break;
+
                 case MaskShape.Subject:
                     if (!HasSubjectMask)
                         EditorGUILayout.HelpBox("还没有主体蒙版，这个部件目前不选中任何东西。" +
@@ -370,6 +388,7 @@ namespace Love.EditorTools
                 case MaskShape.LuminanceRange: return "亮度范围";
                 case MaskShape.DepthRange: return "深度范围";
                 case MaskShape.Subject: return "AI 主体";
+                case MaskShape.Sky: return "天空";
                 default: return "画笔";
             }
         }

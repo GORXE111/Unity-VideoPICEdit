@@ -1,3 +1,7 @@
+# 根 .gitignore 把 *.csproj 全扫掉了（那是给 Unity 生成的那些用的），
+# 但这一份是手写的，新克隆下来没有它就跑不了离线测试
+!offline-tests.csproj
+
 bin/
 obj/
 probe.raw

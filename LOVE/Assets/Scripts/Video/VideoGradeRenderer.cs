@@ -30,6 +30,12 @@ namespace Love.Video
             public Texture depthMap;
 
             /// <summary>
+            /// 天空蒙版。和主体蒙版一样是逐图算出来的，不属于参数集。
+            /// 已经是几何变换之后的构图，所以直接按显示 uv 采样就对得上。
+            /// </summary>
+            public Texture skyMask;
+
+            /// <summary>
             /// 手绘笔刷贴图，按 <see cref="MaskPart.brushId"/> 取。
             /// 贴图进不了 JSON，所以由窗口持有、渲染时递进来。
             /// </summary>
@@ -341,6 +347,9 @@ namespace Love.Video
         {
             if (p.Shape == MaskShape.Subject)
                 return o.externalMask != null ? o.externalMask : Texture2D.blackTexture;
+
+            if (p.Shape == MaskShape.Sky)
+                return o.skyMask != null ? o.skyMask : Texture2D.blackTexture;
 
             if (p.Shape == MaskShape.Brush && o.brushes != null &&
                 p.brushId >= 0 && p.brushId < o.brushes.Count && o.brushes[p.brushId] != null)

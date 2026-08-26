@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>offlinetests</AssemblyName>
+    <RootNamespace>offlinetests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Shim.cs" />
+    <Compile Include="Main.cs" />
+    <Compile Include="Arw2Test.cs" />
+    <Compile Include="StreamTest.cs" />
+    <Compile Include="RepairTest.cs" />
+    <Compile Include="LibraryTest.cs" />
+    <Compile Include="AutoToneTest.cs" />
+    <Compile Include="SettingsTest.cs" />
+    <Compile Include="ExportTest.cs" />
+    <Compile Include="SnapshotTest.cs" />
+    <Compile Include="SkyTest.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\SonyRawImporter.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\VideoFrameStream.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\FfmpegTool.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\ImageRepair.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\PhotoLibrary.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\ExportPreset.cs" />
+    <Compile Include="..\..\LOVE\Assets\Editor\PhotoEditStore.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\AutoTone.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\SkyDetect.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\WhiteBalancePicker.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\GradeMask.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\VideoGradeSettings.cs" />
+  </ItemGroup>
+</Project>

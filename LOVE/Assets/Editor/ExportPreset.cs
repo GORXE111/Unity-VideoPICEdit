@@ -31,10 +31,19 @@ namespace Love.EditorTools
         public string subfolder = "";
 
         // ---- 水印 ----
-        // 只做图片水印。文字水印要在没有 OnGUI 的地方把字渲进贴图，
-        // 编辑器里没有干净的做法；而实际用的人多半也是贴自己的 logo。
         public bool watermark;
+
+        /// <summary>0 = 图片，1 = 文字。</summary>
+        public int wmMode;
+
         public string watermarkPath = "";
+
+        public string wmText = "© 2026";
+        /// <summary>字号，相对输出长边。</summary>
+        public float wmFontScale = 0.035f;
+        public Color wmColor = Color.white;
+        /// <summary>描边宽度，相对字号。亮底上白字看不见，加一圈暗描边就稳了。</summary>
+        public float wmOutline = 0.12f;
         public int corner = 3;            // 0 左上 1 右上 2 左下 3 右下
         public float wmScale = 0.16f;     // 相对输出长边
         public float wmOpacity = 0.75f;
@@ -46,6 +55,9 @@ namespace Love.EditorTools
         public string Extension => jpg ? ".jpg" : ".png";
 
         public ExportPreset Clone() => (ExportPreset)MemberwiseClone();
+
+        /// <summary>四个角。0 左上 1 右上 2 左下 3 右下。</summary>
+        public const int CornerCount = 4;
     }
 
     /// <summary>命名模板要用到的一张图的信息。</summary>
@@ -139,6 +151,26 @@ namespace Love.EditorTools
             float k = p.maxLongEdge / (float)longEdge;
             w = Mathf.Max(1, Mathf.RoundToInt(w * k));
             h = Mathf.Max(1, Mathf.RoundToInt(h * k));
+        }
+
+        /// <summary>
+        /// 水印摆在哪。返回的是屏幕坐标系（原点左上、y 向下）的矩形，
+        /// 和 GL.LoadPixelMatrix(0, w, h, 0) 之后的约定一致。
+        ///
+        /// 抽出来是因为四个角的正负号最容易写反，而写反了只有出图才看得见。
+        /// </summary>
+        public static Rect WatermarkRect(int targetW, int targetH, float contentW, float contentH,
+                                         int corner, float marginFrac)
+        {
+            float longEdge = Mathf.Max(targetW, targetH);
+            float m = longEdge * Mathf.Clamp01(marginFrac);
+
+            bool left = corner == 0 || corner == 2;
+            bool top = corner == 0 || corner == 1;
+
+            float x = left ? m : targetW - contentW - m;
+            float y = top ? m : targetH - contentH - m;
+            return new Rect(x, y, contentW, contentH);
         }
 
         /// <summary>

@@ -16,6 +16,7 @@ namespace UnityEngine
         // Unity 的 Mathf.Round 走的是 Math.Round 的默认行为（银行家舍入），
         // 这里必须一致，否则环上的采样点会差一个像素
         public static int RoundToInt(float f) => (int)Math.Round(f, MidpointRounding.ToEven);
+        public static int CeilToInt(float f) => (int)Math.Ceiling(f);
         public const float PI = 3.14159265358979f;
         public static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
         public static float Max(float a, float b, float c) => Max(Max(a, b), c);
@@ -147,6 +148,8 @@ namespace UnityEngine
     {
         public float r, g, b, a;
         public Color(float r, float g, float b, float a) { this.r = r; this.g = g; this.b = b; this.a = a; }
+
+        public static Color white => new Color(1f, 1f, 1f, 1f);
         public Color(float r, float g, float b) : this(r, g, b, 1f) { }
         public static Color black => new Color(0, 0, 0, 1);
         public static Color HSVToRGB(float h, float s, float v)
