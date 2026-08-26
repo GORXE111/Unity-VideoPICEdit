@@ -41,6 +41,14 @@ namespace UnityEngine
         public static float Sin(float f) => (float)Math.Sin(f);
     }
 
+    public struct RectInt
+    {
+        public int x, y, width, height;
+        public RectInt(int x, int y, int w, int h) { this.x = x; this.y = y; width = w; height = h; }
+        public int xMax => x + width;
+        public int yMax => y + height;
+    }
+
     public struct Color32
     {
         public byte r, g, b, a;

@@ -15,6 +15,7 @@ class Program
         if (args.Length > 0 && args[0] == "--export") return ExportTest.Run(args);
         if (args.Length > 0 && args[0] == "--snapshot") return SnapshotTest.Run(args);
         if (args.Length > 0 && args[0] == "--sky") return SkyTest.Run(args);
+        if (args.Length > 0 && args[0] == "--denoise") return DenoiseTest.Run(args);
 
         string path = args.Length > 0 ? args[0] : @"C:\Users\admin\Downloads\_DSC0018.ARW";
         int step = args.Length > 1 ? int.Parse(args[1]) : 1;

@@ -119,6 +119,17 @@ namespace Love.EditorTools
         [SerializeField] bool _maskRefine = true;
         [SerializeField] float _maskSigmaColor = 0.08f;
         string _maskStatus = "";
+
+        // AI 降噪
+        AiDenoiser _denoiser;
+        [SerializeField] int _dnModelIndex;
+        [SerializeField] float _dnStrength = 1f;
+        RenderTexture _dnRaw;        // 模型出来的，不带强度
+        RenderTexture _dnBlended;    // 和原图按强度混合过的，真正喂给管线的那张
+        string _dnPath;              // _dnRaw 是哪张图的
+        string _dnStatus = "";
+        NoiseEstimate.Result _dnNoise;
+        string _dnNoisePath;
 #endif
 
         // 色卡标定：四角存在图片的 uv 空间（0~1），换图/缩放都不用重算
@@ -235,6 +246,19 @@ namespace Love.EditorTools
                 needRepaint = true;
             }
 
+#if LOVE_SENTIS
+            // 一帧只跑一块。一口气跑完编辑器要假死好几分钟，
+            // 分开跑的话每块之间还能响应输入、还能取消
+            if (_denoiser != null && _denoiser.Running)
+            {
+                _denoiser.Step();
+                _dnStatus = $"降噪中 {_denoiser.TileDone}/{_denoiser.TileCount} 块" +
+                            $"（每块 {_denoiser.LastMs:0} ms）";
+                if (!_denoiser.Running) FinishDenoise();
+                needRepaint = true;
+            }
+#endif
+
             // 待导入的文件也在这里处理：生成缩略图要 Blit
             if (_pendingImports.Count > 0)
             {
@@ -269,6 +293,9 @@ namespace Love.EditorTools
             if (_lut != null) { DestroyImmediate(_lut); _lut = null; }
 #if LOVE_SENTIS
             ReleaseMask();
+            ReleaseDenoise();
+            _denoiser?.Dispose();
+            _denoiser = null;
             _maskGen?.Dispose();
             _maskGen = null;
 #endif
@@ -649,7 +676,19 @@ namespace Love.EditorTools
 
         /// <summary>按原分辨率渲染。缩略图预览的话，Bloom 半径和颗粒尺寸都会和导出结果对不上。</summary>
         /// <summary>喂给调色管线的那张图。有修补就用修补后的，没有就用原图。</summary>
-        Texture GradeSource => _repair.Result != null ? (Texture)_repair.Result : _full;
+        Texture GradeSource
+        {
+            get
+            {
+#if LOVE_SENTIS
+                // 降噪排在修补前面：修补是拿周围像素补窟窿，
+                // 在带噪的图上找取样源，补上去的那块也是带噪的
+                if (_dnBlended != null && _lib.Current != null && _dnPath == _lib.Current.path)
+                    return _dnBlended;
+#endif
+                return _repair.Result != null ? (Texture)_repair.Result : _full;
+            }
+        }
 
         void RenderPreview()
         {
@@ -2051,6 +2090,144 @@ namespace Love.EditorTools
 
             if (!string.IsNullOrEmpty(_maskStatus))
                 EditorGUILayout.LabelField(_maskStatus, EditorStyles.miniLabel);
+
+            EditorGUILayout.Space(8f);
+            DrawDenoiseBar();
+        }
+
+        void DrawDenoiseBar()
+        {
+            EditorGUILayout.LabelField("AI 降噪", EditorStyles.boldLabel);
+
+            _dnModelIndex = EditorGUILayout.Popup(_dnModelIndex,
+                System.Array.ConvertAll(AiDenoiser.Presets, m => m.label));
+
+            // 先量一下这张有多噪，给个起手强度。量的是缩略图，够用了
+            var e = _lib.Current;
+            if (e != null && e.thumb != null && _dnNoisePath != e.path)
+            {
+                _dnNoise = NoiseEstimate.Analyze(e.thumb.GetPixels32(), e.thumb.width, e.thumb.height);
+                _dnNoisePath = e.path;
+            }
+
+            if (_dnNoise.valid)
+                EditorGUILayout.LabelField(
+                    $"实测噪声：亮 {_dnNoise.luma * 255f:F1}／色 {_dnNoise.chroma * 255f:F1}（0~255 的尺度）",
+                    EditorStyles.miniLabel);
+
+            bool busy = _denoiser != null && _denoiser.Running;
+
+            using (new EditorGUI.DisabledScope(_full == null || busy))
+            {
+                if (GUILayout.Button(_dnRaw == null ? "生成降噪" : "重新生成"))
+                    _pendingAction = StartDenoise;
+            }
+
+            if (busy)
+            {
+                var r = EditorGUILayout.GetControlRect(GUILayout.Height(18f));
+                EditorGUI.ProgressBar(r, _denoiser.Progress, $"{_denoiser.Progress * 100f:F0}%");
+                if (GUILayout.Button("取消"))
+                {
+                    _denoiser.Cancel();
+                    _dnStatus = "已取消";
+                }
+            }
+            else if (_dnRaw != null)
+            {
+                EditorGUI.BeginChangeCheck();
+                _dnStrength = EditorGUILayout.Slider(
+                    new GUIContent("强度", "和原图混合的比例。模型总会抹掉一点东西，" +
+                                          "干净的图上强度拉满反而丢细节"),
+                    _dnStrength, 0f, 1f);
+                if (EditorGUI.EndChangeCheck()) _pendingAction = BlendDenoise;
+
+                if (GUILayout.Button("清除降噪")) _pendingAction = ReleaseDenoise;
+            }
+
+            if (!string.IsNullOrEmpty(_dnStatus))
+                EditorGUILayout.LabelField(_dnStatus, EditorStyles.miniLabel);
+        }
+
+        void StartDenoise()
+        {
+            if (_full == null || _lib.Current == null) return;
+            if (_denoiser == null) _denoiser = new AiDenoiser();
+
+            var spec = AiDenoiser.Presets[Mathf.Clamp(_dnModelIndex, 0, AiDenoiser.Presets.Length - 1)];
+
+            if (!_denoiser.Begin(_full, spec, Unity.Sentis.BackendType.GPUCompute, out string err))
+            {
+                _dnStatus = "失败：" + err;
+                return;
+            }
+
+            _dnPath = _lib.Current.path;
+            _dnStatus = $"切成 {_denoiser.TileCount} 块，开始…";
+
+            // 起手强度按实测噪声给，别让人对着一张本来就干净的图拉满
+            if (_dnNoise.valid) _dnStrength = NoiseEstimate.SuggestStrength(_dnNoise.luma);
+        }
+
+        void FinishDenoise()
+        {
+            if (_denoiser == null) return;
+
+            if (_dnRaw != null) { _dnRaw.Release(); DestroyImmediate(_dnRaw); }
+            _dnRaw = _denoiser.Result;
+            _denoiser.ReleaseResult();   // 所有权交出来，下一轮 Begin 不要再动它
+
+            _dnStatus = _dnRaw != null ? $"降噪完成，{_denoiser.TileCount} 块" : "没有结果";
+            BlendDenoise();
+        }
+
+        /// <summary>
+        /// 按强度把降噪结果和原图混起来。
+        ///
+        /// 用 DrawTexture 的 alpha 混合直接做 lerp，省一个 shader——
+        /// 和贴水印是同一个路子。
+        /// </summary>
+        void BlendDenoise()
+        {
+            if (_dnRaw == null || _full == null) return;
+
+            if (_dnBlended == null || _dnBlended.width != _dnRaw.width || _dnBlended.height != _dnRaw.height)
+            {
+                if (_dnBlended != null) { _dnBlended.Release(); DestroyImmediate(_dnBlended); }
+                _dnBlended = new RenderTexture(_dnRaw.width, _dnRaw.height, 0,
+                                               RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB)
+                { hideFlags = HideFlags.HideAndDontSave };
+                _dnBlended.Create();
+            }
+
+            Graphics.Blit(_full, _dnBlended);
+
+            float a = Mathf.Clamp01(_dnStrength);
+            if (a > 0.001f)
+            {
+                var prev = RenderTexture.active;
+                RenderTexture.active = _dnBlended;
+                GL.PushMatrix();
+                GL.LoadPixelMatrix(0f, _dnBlended.width, _dnBlended.height, 0f);
+                Graphics.DrawTexture(new Rect(0f, 0f, _dnBlended.width, _dnBlended.height), _dnRaw,
+                                     new Rect(0f, 0f, 1f, 1f), 0, 0, 0, 0,
+                                     new Color(1f, 1f, 1f, a));
+                GL.PopMatrix();
+                RenderTexture.active = prev;
+            }
+
+            _dirty = true;
+            Repaint();
+        }
+
+        void ReleaseDenoise()
+        {
+            _denoiser?.Cancel();
+            if (_dnRaw != null) { _dnRaw.Release(); DestroyImmediate(_dnRaw); _dnRaw = null; }
+            if (_dnBlended != null) { _dnBlended.Release(); DestroyImmediate(_dnBlended); _dnBlended = null; }
+            _dnPath = null;
+            _dnStatus = "";
+            _dirty = true;
         }
 
         void GenerateMask()

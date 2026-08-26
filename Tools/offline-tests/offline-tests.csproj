@@ -20,6 +20,7 @@
     <Compile Include="ExportTest.cs" />
     <Compile Include="SnapshotTest.cs" />
     <Compile Include="SkyTest.cs" />
+    <Compile Include="DenoiseTest.cs" />
     <Compile Include="..\..\LOVE\Assets\Editor\SonyRawImporter.cs" />
     <Compile Include="..\..\LOVE\Assets\Editor\VideoFrameStream.cs" />
     <Compile Include="..\..\LOVE\Assets\Editor\FfmpegTool.cs" />
@@ -29,6 +30,8 @@
     <Compile Include="..\..\LOVE\Assets\Editor\PhotoEditStore.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Video\AutoTone.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Video\SkyDetect.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\DenoiseTiler.cs" />
+    <Compile Include="..\..\LOVE\Assets\Scripts\Video\NoiseEstimate.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Video\WhiteBalancePicker.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Video\GradeMask.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Video\VideoGradeSettings.cs" />
