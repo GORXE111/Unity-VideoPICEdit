@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using UnityEditor;
 using UnityEngine;
 
 namespace Love.EditorTools
@@ -86,7 +85,7 @@ namespace Love.EditorTools
         {
             var e = new PhotoEntry { path = path, name = name, thumb = thumb };
             try { e.modified = File.GetLastWriteTimeUtc(path).Ticks; } catch { e.modified = 0; }
-            LoadMeta(e);
+            MetaLoader?.Invoke(e);
             _all.Add(e);
             Rebuild();
             return e;
@@ -227,7 +226,7 @@ namespace Love.EditorTools
         {
             if (e == null) return;
             e.rating = Mathf.Clamp(stars, 0, 5);
-            SaveMeta(e);
+            MetaSaver?.Invoke(e);
             if (_filter >= PhotoFilter.Rated1) Rebuild();
             else if (_sort == PhotoSort.Rating) Rebuild();
         }
@@ -236,7 +235,7 @@ namespace Love.EditorTools
         {
             if (e == null) return;
             e.flag = Mathf.Clamp(flag, -1, 1);
-            SaveMeta(e);
+            MetaSaver?.Invoke(e);
             if (_filter == PhotoFilter.Picked || _filter == PhotoFilter.NotRejected) Rebuild();
         }
 
@@ -250,33 +249,15 @@ namespace Love.EditorTools
             Rebuild();
         }
 
-        // ---------------- 评级的持久化 ----------------
+        // ---------------- 评级的存取 ----------------
         //
-        // 存 EditorPrefs 而不是在用户的照片旁边写 sidecar 文件：
-        // 那是别人的目录，不该由我们往里扔东西。代价是换机器就没了。
+        // 库本身不碰文件。存哪、怎么存由调用方决定，
+        // 这样它才留得住"没有 IO 依赖、能离线测"这个性质。
 
-        const string MetaPrefix = "PhotoGrade.meta.";
+        /// <summary>加进来的时候用它填 rating / flag。不设就是全新的。</summary>
+        public Action<PhotoEntry> MetaLoader { get; set; }
 
-        static string Key(string path) => MetaPrefix + path.GetHashCode().ToString("X8");
-
-        static void SaveMeta(PhotoEntry e)
-        {
-            if (e.rating == 0 && e.flag == 0) EditorPrefs.DeleteKey(Key(e.path));
-            else EditorPrefs.SetString(Key(e.path), e.rating + "|" + e.flag + "|" + e.path);
-        }
-
-        static void LoadMeta(PhotoEntry e)
-        {
-            string v = EditorPrefs.GetString(Key(e.path), "");
-            if (string.IsNullOrEmpty(v)) return;
-
-            var p = v.Split('|');
-            // 第三段是完整路径。哈希会撞，撞上了就当没存过，总比把别人的评级安到这张头上强
-            if (p.Length < 3 || p[2] != e.path) return;
-            int.TryParse(p[0], out e.rating);
-            int.TryParse(p[1], out e.flag);
-            e.rating = Mathf.Clamp(e.rating, 0, 5);
-            e.flag = Mathf.Clamp(e.flag, -1, 1);
-        }
+        /// <summary>rating / flag 变了的时候通知一声。</summary>
+        public Action<PhotoEntry> MetaSaver { get; set; }
     }
 }

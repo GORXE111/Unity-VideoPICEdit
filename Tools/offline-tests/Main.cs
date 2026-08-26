@@ -11,6 +11,7 @@ class Program
         if (args.Length > 0 && args[0] == "--repair") return RepairTest.Run(args);
         if (args.Length > 0 && args[0] == "--library") return LibraryTest.Run(args);
         if (args.Length > 0 && args[0] == "--autotone") return AutoToneTest.Run(args);
+        if (args.Length > 0 && args[0] == "--settings") return SettingsTest.Run(args);
 
         string path = args.Length > 0 ? args[0] : @"C:\Users\admin\Downloads\_DSC0018.ARW";
         int step = args.Length > 1 ? int.Parse(args[1]) : 1;

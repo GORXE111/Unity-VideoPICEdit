@@ -144,6 +144,7 @@ MaskBrush.shader     手绘笔刷，靠 BlendOp Max/Min 直接画进蒙版
 GradeMask            蒙版组与部件的数据（Lightroom 那套结构）
 ImageRepair          污点修复 / 仿制图章（编辑器侧），修补记录可重放
 PhotoLibrary         图片库：排序 / 筛选 / 评级 / 多选，纯逻辑无 GUI 依赖
+PhotoEditStore       逐图的参数 / 修补 / 评级落盘到 UserSettings/
 ImageRepair.shader   修补一处：仿制 + 色调补偿
 AutoTone             按直方图给一组起手曝光与色阶
 WhiteBalancePicker   从一个中性灰像素反解色温色调（数值搜索，不是解析求逆）
@@ -261,6 +262,11 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
   整个编辑器跟着发涩。只在真有变化时重绘。
 - **风格化必须排在蒙版之后**。暗角、颗粒这些作用于整幅成片，放在蒙版之前的话，
   一块提亮天空的蒙版会连暗角一起提亮。Camera Raw 也是这个顺序。
+- **窗口里的 `Dictionary` 字段活不过程序集重载**。Unity 序列化不了它，也就是说
+  改一行 C# 或者关掉窗口，里面的东西全没。凡是用户会心疼的数据都得落盘
+  （`PhotoEditStore` 写 `UserSettings/`，那个目录已经在 .gitignore 里）。
+- **`JsonUtility` 不保留 null 引用**。`[Serializable]` 类字段存进去是 null，
+  读出来会变成一个默认构造的对象。要区分"没有"和"默认值"，就得另加一个 bool 标志。
 - **自动算参数时，管线上互相影响的两步要一起解**。`AutoTone` 里曝光排在色阶前面，
   但色阶的拉伸会把中位数再推一次，分开算的结果是"一张本来正常的照片被推到过亮"。
   迭代几轮反解即可。

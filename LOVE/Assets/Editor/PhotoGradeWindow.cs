@@ -60,11 +60,11 @@ namespace Love.EditorTools
         // 图片库：排序、筛选、评级、多选都在里面。抽出去是因为那部分全是纯逻辑，能离线测
         readonly PhotoLibrary _lib = new PhotoLibrary();
 
-        // 逐图参数。以前是一套参数管所有图，换一张图参数不变——
-        // 那对"开发一个 look"很顺手，但一批照片各自曝光不同时就不对了。
-        // 现在每张图有自己的一套，新图沿用当前这套当起点（相当于 Lightroom 的"上一张设置"）
-        readonly Dictionary<string, VideoGradeSettings> _settingsByPath =
-            new Dictionary<string, VideoGradeSettings>();
+        // 逐图的参数、修补、评级全存在这里，并且会落盘。
+        //
+        // 之前这些放在窗口的 Dictionary 字段里——Unity 序列化不了 Dictionary，
+        // 于是改一行 C# 触发程序集重载、或者关掉窗口，几十张图的活就全没了。
+        readonly PhotoEditStore _store = new PhotoEditStore();
         VideoGradeSettings _clipboard;
         [SerializeField] AutoTone.Options _autoOpt = AutoTone.Options.Default;
         string _loadedPath;
@@ -140,9 +140,7 @@ namespace Love.EditorTools
         Vector2? _cloneSource;                     // 仿制图章的取样点，Alt+点击设定
         bool _repairDirty;                         // 需要重放修补
 
-        // 修补是逐图的。按路径存着，翻胶片条回来还在
-        readonly Dictionary<string, List<RepairSpot>> _repairByPath =
-            new Dictionary<string, List<RepairSpot>>();
+
         readonly List<Texture> _brushes = new List<Texture>();
         Material _brushMat;
         [SerializeField] float _brushRadius = 0.06f;   // 相对画面短边
@@ -167,6 +165,16 @@ namespace Love.EditorTools
             _filmH = EditorPrefs.GetFloat(PrefFilmH, 96f);
             _filmVisible = EditorPrefs.GetBool(PrefFilmOn, true);
             _panelVisible = EditorPrefs.GetBool(PrefPanelOn, true);
+
+            _store.Load();
+            _lib.MetaLoader = e =>
+            {
+                var rec = _store.Get(e.path);
+                if (rec == null) return;
+                e.rating = Mathf.Clamp(rec.rating, 0, 5);
+                e.flag = Mathf.Clamp(rec.flag, -1, 1);
+            };
+            _lib.MetaSaver = e => _store.PutMeta(e.path, e.rating, e.flag);
         }
 
         void SaveLayout()
@@ -193,8 +201,12 @@ namespace Love.EditorTools
             {
                 _repairDirty = false;
                 _repair.Rebuild(_full);      // 里面有 Blit，只能在这里做
+                StashRepairs();
                 _dirty = true;
             }
+
+            // 限流落盘。拖滑条时不会每帧写文件，但崩了最多丢八秒
+            if (_store.Dirty) { StashSettings(); _store.Save(); }
 
             FlushDabs();
 
@@ -227,6 +239,11 @@ namespace Love.EditorTools
             _renderer?.Dispose();
             _renderer = null;
             if (_materialCopy != null) { DestroyImmediate(_materialCopy); _materialCopy = null; }
+            // 关窗前把当前这张收好再落盘，否则最后改的那点就白改了
+            StashSettings();
+            StashRepairs();
+            _store.Save(force: true);
+
             ReleasePreview();
             ReleaseBrushes();
             _repair.Dispose();
@@ -775,6 +792,22 @@ namespace Love.EditorTools
 
             if (_clipboard != null)
                 EditorGUILayout.LabelField("剪贴板", "已存一套参数", EditorStyles.miniLabel);
+
+            EditorGUILayout.Space(2f);
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"已记录 {_store.Count} 张的编辑", EditorStyles.miniLabel);
+            if (GUILayout.Button(new GUIContent("清除全部记录", PhotoEditStore.FilePath),
+                                 EditorStyles.miniButton, GUILayout.Width(84f)))
+            {
+                if (EditorUtility.DisplayDialog("清除编辑记录",
+                        $"删掉全部 {_store.Count} 张图的参数、修补和评级？\n\n这个操作不可撤销。",
+                        "删除", "取消"))
+                {
+                    _store.Clear();
+                    Debug.Log("[修图台] 编辑记录已清除");
+                }
+            }
+            EditorGUILayout.EndHorizontal();
         }
 
         void SyncSettings(List<PhotoEntry> targets)
@@ -786,7 +819,7 @@ namespace Love.EditorTools
                 return;
 
             StashSettings();
-            foreach (var e in targets) _settingsByPath[e.path] = _settings.Clone();
+            foreach (var e in targets) _store.PutSettings(e.path, _settings);
             Debug.Log($"[修图台] 参数已同步到 {targets.Count} 张");
         }
 
@@ -1204,8 +1237,7 @@ namespace Love.EditorTools
             foreach (var e in gone)
             {
                 if (e.thumb != null) DestroyImmediate(e.thumb);
-                _settingsByPath.Remove(e.path);
-                _repairByPath.Remove(e.path);
+                _store.Remove(e.path);
                 _lib.Remove(e);
             }
 
@@ -1247,14 +1279,14 @@ namespace Love.EditorTools
 
             // 取回这张图自己的参数。没有就沿用当前这套当起点——
             // 正在开发一个 look 时，翻到下一张不该被打回默认值
-            if (_settingsByPath.TryGetValue(e.path, out var saved2)) _settings.CopyFrom(saved2);
-            _settingsByPath[e.path] = _settings.Clone();
+            var rec = _store.GetOrCreate(e.path);
+            if (rec.hasSettings && rec.settings != null) _settings.CopyFrom(rec.settings);
+            _store.PutSettings(e.path, _settings);
 
             // 取回这张图自己的修补。找源用的缩略图也得作废，
             // 否则会拿上一张图去搜取样点
             _repair.Spots.Clear();
-            if (_repairByPath.TryGetValue(e.path, out var saved))
-                _repair.Spots.AddRange(saved);
+            if (rec.repairs != null) _repair.Spots.AddRange(rec.repairs);
             _repair.InvalidateProbe();
             _cloneSource = null;
             _repairDirty = true;
@@ -1344,24 +1376,21 @@ namespace Love.EditorTools
         /// <summary>把当前图的参数记到路径下。换图前要调，否则改动会跟着丢。</summary>
         void StashSettings()
         {
-            if (!string.IsNullOrEmpty(_loadedPath)) _settingsByPath[_loadedPath] = _settings.Clone();
+            if (!string.IsNullOrEmpty(_loadedPath)) _store.PutSettings(_loadedPath, _settings);
         }
 
         /// <summary>把当前图的修补记到路径下。换图和关窗前都要调。</summary>
         void StashRepairs()
         {
             if (string.IsNullOrEmpty(_loadedPath)) return;
-            string path = _loadedPath;
-            if (_repair.Spots.Count > 0) _repairByPath[path] = new List<RepairSpot>(_repair.Spots);
-            else _repairByPath.Remove(path);
+            _store.PutRepairs(_loadedPath, _repair.Spots);
         }
 
         void ClearEntries()
         {
             foreach (var e in _lib.All) if (e.thumb != null) DestroyImmediate(e.thumb);
+            // 只清列表，不清编辑记录——下次把同一批图拖回来，调过的还在
             _lib.Clear();
-            _settingsByPath.Clear();
-            _repairByPath.Clear();
             _loadedPath = null;
             if (_full != null) { DestroyImmediate(_full); _full = null; }
             ReleasePreview();
@@ -2082,20 +2111,19 @@ namespace Love.EditorTools
                     if (px == null) continue;
 
                     // 在这张自己已有的参数上改，风格化那些不动
-                    if (!_settingsByPath.TryGetValue(e.path, out var st))
-                    {
-                        st = _settings.Clone();
-                        _settingsByPath[e.path] = st;
-                    }
-                    AutoTone.Apply(AutoTone.Analyze(px), st, _autoOpt);
+                    var rec = _store.GetOrCreate(e.path);
+                    if (!rec.hasSettings || rec.settings == null) _store.PutSettings(e.path, _settings);
+                    AutoTone.Apply(AutoTone.Analyze(px), rec.settings, _autoOpt);
+                    _store.MarkDirty();
                     done++;
                 }
             }
             finally { EditorUtility.ClearProgressBar(); }
 
             // 当前这张的参数要同步回界面上那一套，否则滑条还是旧值
-            if (_lib.Current != null && _settingsByPath.TryGetValue(_lib.Current.path, out var cur))
-                _settings.CopyFrom(cur);
+            var curRec = _lib.Current != null ? _store.Get(_lib.Current.path) : null;
+            if (curRec != null && curRec.hasSettings && curRec.settings != null)
+                _settings.CopyFrom(curRec.settings);
 
             Debug.Log($"[修图台] 自动色调已应用到 {done} 张");
             _dirty = true;
