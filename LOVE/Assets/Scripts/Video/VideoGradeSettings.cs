@@ -523,7 +523,45 @@ namespace Love.Video
             secondaryEnabled = false;
         }
 
-        /// <summary>真正要跑的蒙版组数。空组和没改动的组不算。</summary>
+        /// <summary>有没有哪一组开着独看。</summary>
+        public bool AnySolo
+        {
+            get
+            {
+                if (maskGroups == null) return false;
+                foreach (var g in maskGroups)
+                    if (g != null && g.solo) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 这一组要不要参与渲染。
+        ///
+        /// **渲染器和界面都必须走这一个判定。** 分成两处写的话，迟早出现
+        /// 「界面说 3 组生效、实际渲染 2 组」，而这种偏差没人会怀疑到判定本身。
+        /// </summary>
+        public bool GroupRenders(MaskGroup g)
+        {
+            if (g == null || !g.enabled) return false;
+            if (AnySolo && !g.solo) return false;
+            if (!g.HasEffect) return false;
+
+            // 全被静音的组等于没有部件
+            return CountAudibleParts(g) > 0;
+        }
+
+        /// <summary>这一组里还剩几个部件真的参与合成。</summary>
+        public static int CountAudibleParts(MaskGroup g)
+        {
+            if (g?.parts == null) return 0;
+            int n = 0;
+            foreach (var p in g.parts)
+                if (p != null && !p.muted) n++;
+            return n;
+        }
+
+        /// <summary>真正要跑的蒙版组数。空组、没改动的组、被独看挡掉的组都不算。</summary>
         public int ActiveMaskGroups
         {
             get
@@ -531,7 +569,7 @@ namespace Love.Video
                 if (maskGroups == null) return 0;
                 int n = 0;
                 foreach (var g in maskGroups)
-                    if (g != null && g.enabled && g.parts.Count > 0 && g.HasEffect) n++;
+                    if (GroupRenders(g)) n++;
                 return n;
             }
         }

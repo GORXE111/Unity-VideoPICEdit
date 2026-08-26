@@ -39,6 +39,16 @@ namespace Love.Video
         public int shape = (int)MaskShape.Ellipse;
         public int op = (int)MaskOp.Add;
         public bool invert;
+
+        /// <summary>
+        /// 临时不参与合成。
+        ///
+        /// **叫 muted 而不是 enabled 是有原因的。** JsonUtility 读老预设时，
+        /// 文件里没有的 bool 一律是 false；如果字段叫 enabled，
+        /// 那所有老预设里的部件读进来全部失效，而且是静默的。
+        /// 用"默认 false = 维持原样"的命名，加字段才安全。
+        /// </summary>
+        public bool muted;
         public float opacity = 1f;
 
         // ---- 形状类（椭圆 / 矩形 / 线性渐变共用）----
@@ -87,6 +97,15 @@ namespace Love.Video
 
         /// <summary>把这一组的蒙版以红色叠加显示出来。调选区时必须能看见边界，靠猜是调不出来的。</summary>
         public bool showOverlay;
+
+        /// <summary>
+        /// 独看。只要有任何一组开着，就只有开着的那些参与渲染。
+        ///
+        /// 和 <see cref="enabled"/> 分开：enabled 是"这组要不要"，
+        /// 独看是"这会儿我只想看这组"。两者混用的话，
+        /// 关掉独看之后没法把原来关掉的那些恢复回去。
+        /// </summary>
+        public bool solo;
 
         public List<MaskPart> parts = new List<MaskPart>();
 

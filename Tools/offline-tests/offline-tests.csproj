@@ -21,6 +21,7 @@
     <Compile Include="SnapshotTest.cs" />
     <Compile Include="SkyTest.cs" />
     <Compile Include="DenoiseTest.cs" />
+    <Compile Include="MaskVisibilityTest.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Photo\SonyRawImporter.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Photo\VideoFrameStream.cs" />
     <Compile Include="..\..\LOVE\Assets\Scripts\Photo\FfmpegTool.cs" />

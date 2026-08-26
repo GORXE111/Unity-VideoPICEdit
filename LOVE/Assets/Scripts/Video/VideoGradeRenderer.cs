@@ -291,18 +291,26 @@ namespace Love.Video
 
             foreach (var g in s.maskGroups)
             {
-                if (g == null || !g.enabled || g.parts.Count == 0 || !g.HasEffect) continue;
+                if (!s.GroupRenders(g)) continue;
 
                 Texture prev = Texture2D.blackTexture;
                 var cur = maskA;
+                bool first = true;
 
                 for (int i = 0; i < g.parts.Count; i++)
                 {
-                    // 第一个部件恒按「加」处理：从全黑起步，减和交都无从谈起
-                    ApplyPartUniforms(g.parts[i], i == 0, o);
+                    var part = g.parts[i];
+                    if (part == null || part.muted) continue;
+
+                    // 第一个部件恒按「加」处理：从全黑起步，减和交都无从谈起。
+                    // 注意是第一个**没被静音**的，不是下标 0 ——
+                    // 把第一个静音掉之后，第二个就成了起点，那时它还按「减」算的话
+                    // 结果恒为全黑，界面上看就是"这组突然没了"
+                    ApplyPartUniforms(part, first, o);
                     _material.SetTexture(IdPrevMask, prev);
                     Graphics.Blit(image, cur, _material, PassMaskBuild);
 
+                    first = false;
                     prev = cur;
                     cur = ReferenceEquals(cur, maskA) ? maskB : maskA;
                 }

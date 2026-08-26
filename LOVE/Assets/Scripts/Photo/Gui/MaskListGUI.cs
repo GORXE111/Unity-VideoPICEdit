@@ -107,8 +107,13 @@ namespace Love.Tools
             }
 
             GUILayout.FlexibleSpace();
-            G.MiniLabelW($"{s.maskGroups.Count} 组", 40f);
+
+            // 生效组数走 ActiveMaskGroups，和渲染器是同一份判定
+            int active = s.ActiveMaskGroups;
+            G.MiniLabelW($"{active}/{s.maskGroups.Count} 生效", 62f);
             GUILayout.EndHorizontal();
+
+            if (s.maskGroups.Count > 0) DrawBulkBar(s);
         }
 
         void AddGroup(VideoGradeSettings s, MaskShape shape, string label)
@@ -143,26 +148,108 @@ namespace Love.Tools
         }
 
         /// <summary>返回 true 表示这一组被删了。</summary>
+        /// <summary>
+        /// 批量显隐。调超过两三组之后，一个一个点太慢了。
+        /// </summary>
+        void DrawBulkBar(VideoGradeSettings s)
+        {
+            GUILayout.BeginHorizontal();
+
+            if (G.MiniButton("全显", 40f)) SetAllEnabled(s, true);
+            if (G.MiniButton("全隐", 40f)) SetAllEnabled(s, false);
+
+            bool anySolo = s.AnySolo;
+            using (G.Disabled(!anySolo))
+                if (G.MiniButton("取消独看", 62f)) ClearSolo(s);
+
+            GUILayout.FlexibleSpace();
+
+            if (anySolo) G.MiniLabelW("独看中", 46f);
+            GUILayout.EndHorizontal();
+        }
+
+        void SetAllEnabled(VideoGradeSettings s, bool on)
+        {
+            _recordUndo?.Invoke(on ? "全部显示蒙版" : "全部隐藏蒙版");
+            foreach (var g in s.maskGroups) if (g != null) g.enabled = on;
+            _markChanged?.Invoke();
+        }
+
+        void ClearSolo(VideoGradeSettings s)
+        {
+            _recordUndo?.Invoke("取消独看");
+            foreach (var g in s.maskGroups) if (g != null) g.solo = false;
+            _markChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// 点独看。
+        ///
+        /// 按住 Ctrl 是"加进独看"，否则是"只看这一组"——
+        /// 和各家时间线软件的 solo 一个手势，不用另学。
+        /// </summary>
+        void ToggleSolo(VideoGradeSettings s, MaskGroup g)
+        {
+            _recordUndo?.Invoke("独看蒙版");
+
+            var e = Event.current;
+            bool additive = e != null && (e.control || e.command);
+
+            if (!additive)
+            {
+                bool wasOnlyMe = g.solo;
+                foreach (var other in s.maskGroups) if (other != null) other.solo = false;
+                // 本来就只独看着我，再点一下是取消
+                g.solo = !wasOnlyMe;
+            }
+            else g.solo = !g.solo;
+
+            _markChanged?.Invoke();
+        }
+
         bool DrawGroup(VideoGradeSettings s, int index)
         {
             var g = s.maskGroups[index];
             bool expanded = _expanded == index;
 
             var head = G.Row(20f);
+            bool renders = s.GroupRenders(g);
+
             if (Event.current.type == EventType.Repaint)
+            {
                 G.FillRect(head, expanded ? new Color(1f, 1f, 1f, 0.06f) : new Color(1f, 1f, 1f, 0.025f));
+
+                // 开着但被独看挡掉的，压暗一档——否则"我明明开着它怎么没效果"
+                if (g.enabled && !renders)
+                    G.FillRect(head, new Color(0f, 0f, 0f, 0.35f));
+
+                // 生效的那些左边给一道亮条
+                G.FillRect(new Rect(head.x, head.y + 2f, 2f, head.height - 4f),
+                           renders ? new Color(0.35f, 0.75f, 1f, 0.9f)
+                                   : new Color(1f, 1f, 1f, 0.12f));
+            }
 
             float x = head.x + 2f;
 
-            bool on = G.ToggleIn(new Rect(x, head.y + 2f, 16f, 16f), g.enabled);
-            if (on != g.enabled) { _recordUndo?.Invoke("启用蒙版"); g.enabled = on; _markChanged?.Invoke(); }
-            x += 18f;
+            // 眼睛比勾选框直观：一眼看出哪几组现在是看得见的
+            bool on = G.MiniToggleIn(new Rect(x, head.y + 1f, 22f, 18f), g.enabled,
+                                     g.enabled ? "◉" : "○",
+                                     g.enabled ? "点一下隐藏这组" : "点一下显示这组");
+            if (on != g.enabled) { _recordUndo?.Invoke("显示/隐藏蒙版"); g.enabled = on; _markChanged?.Invoke(); }
+            x += 24f;
 
             // 名字可以直接改。一屏五六组时，"蒙版 3"这种名字等于没有
             G.BeginChange();
             string nm = G.TextFieldIn(new Rect(x, head.y + 1f, head.width - 150f, 18f), g.name);
             if (G.EndChange()) { _recordUndo?.Invoke("重命名蒙版"); g.name = nm; }
-            x = head.xMax - 128f;
+            x = head.xMax - 152f;
+
+            // 独看：只看这一组。Ctrl 点是加进独看
+            bool solo = g.solo;
+            bool ns = G.MiniToggleIn(new Rect(x, head.y + 1f, 22f, 18f), solo, "S",
+                                     "独看这一组。Ctrl 点可以多选几组一起看");
+            if (ns != solo) ToggleSolo(s, g);
+            x += 24f;
 
             bool ov = G.MiniToggleIn(new Rect(x, head.y + 1f, 42f, 18f), g.showOverlay,
                                      "显示", "把选区以红色叠加在画面上");
@@ -219,6 +306,15 @@ namespace Love.Tools
                 }
 
                 G.MiniLabelW(ShapeName(p.Shape), 70f);
+
+                // 部件级的显隐。调多部件的组时，最想要的就是"先把这个关掉看看"
+                bool mute = G.MiniToggle(!p.muted, p.muted ? "○" : "◉", 26f);
+                if (mute == p.muted)   // 显示的是"要不要"，存的是"静不静音"，正好相反
+                {
+                    _recordUndo?.Invoke("显示/隐藏部件");
+                    p.muted = !p.muted;
+                    _markChanged?.Invoke();
+                }
 
                 bool inv = G.MiniToggle(p.invert, "反相", 38f);
                 if (inv != p.invert) { _recordUndo?.Invoke("蒙版反相"); p.invert = inv; _markChanged?.Invoke(); }

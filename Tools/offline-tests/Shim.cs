@@ -102,6 +102,7 @@ namespace UnityEngine
 
     public static class Application
     {
+        public static string persistentDataPath => System.IO.Path.GetTempPath();
         public static RuntimePlatform platform => RuntimePlatform.WindowsEditor;
         public static bool isBatchMode => true;
         // 桩里只要它存在。落盘那部分靠 Unity 验，这里测的是快照的淘汰规则
