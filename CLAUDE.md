@@ -265,6 +265,10 @@ IS-Net / U²-Net（Apache 2.0）、MiDaS（MIT）。RobustVideoMatting 是 GPL-3
 - **窗口里的 `Dictionary` 字段活不过程序集重载**。Unity 序列化不了它，也就是说
   改一行 C# 或者关掉窗口，里面的东西全没。凡是用户会心疼的数据都得落盘
   （`PhotoEditStore` 写 `UserSettings/`，那个目录已经在 .gitignore 里）。
+- **批量写文件时，重名判断不能只看磁盘**。同一批里两条算出同一个名字时文件还没落地，
+  第二条会直接盖掉第一条。除了 `File.Exists` 还得记一份"这批已经用掉的名字"。
+- **字符串要比内容不能比引用**。`ReferenceEquals(a.path, b.path)` 对两个内容相同的
+  string 也可能是 false，而且不会报错——只会让某个分支永远走不到。
 - **`JsonUtility` 不保留 null 引用**。`[Serializable]` 类字段存进去是 null，
   读出来会变成一个默认构造的对象。要区分"没有"和"默认值"，就得另加一个 bool 标志。
 - **自动算参数时，管线上互相影响的两步要一起解**。`AutoTone` 里曝光排在色阶前面，

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using Love.Video;
@@ -54,8 +55,6 @@ namespace Love.EditorTools
         [SerializeField] bool _splitCompare;
         [SerializeField] float _splitPosition = 0.5f;
         [SerializeField] bool _bypass;
-        [SerializeField] int _jpgQuality = 95;
-        [SerializeField] bool _exportJpg;
 
         // 图片库：排序、筛选、评级、多选都在里面。抽出去是因为那部分全是纯逻辑，能离线测
         readonly PhotoLibrary _lib = new PhotoLibrary();
@@ -2165,21 +2164,47 @@ namespace Love.EditorTools
 
         #region 导出
 
+        [SerializeField] ExportPreset _export = new ExportPreset();
+        Texture2D _watermark;
+        string _watermarkLoaded;
+
+        static readonly string[] CornerNames = { "左上", "右上", "左下", "右下" };
+        static readonly string[] CollisionNames = { "自动加序号", "直接覆盖", "跳过" };
+
         void DrawExportBar()
         {
             EditorGUILayout.LabelField("导出", EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
-            _exportJpg = EditorGUILayout.Popup(_exportJpg ? 1 : 0,
+            _export.jpg = EditorGUILayout.Popup(_export.jpg ? 1 : 0,
                 new[] { "PNG（无损）", "JPG" }, GUILayout.Width(100f)) == 1;
-            if (_exportJpg) _jpgQuality = EditorGUILayout.IntSlider(_jpgQuality, 1, 100);
+            if (_export.jpg) _export.jpgQuality = EditorGUILayout.IntSlider(_export.jpgQuality, 1, 100);
             EditorGUILayout.EndHorizontal();
 
+            _export.maxLongEdge = EditorGUILayout.IntField(
+                new GUIContent("长边上限", "0 表示不限制。发网上一般 2048 或 1600"), _export.maxLongEdge);
+            if (_export.maxLongEdge > 0)
+                _export.noUpscale = EditorGUILayout.Toggle(
+                    new GUIContent("只缩不放", "原图比上限还小时不硬拉大——那只会糊"), _export.noUpscale);
+
+            _export.nameTemplate = EditorGUILayout.TextField(
+                new GUIContent("命名模板", "可用记号见下面"), _export.nameTemplate);
+            _export.subfolder = EditorGUILayout.TextField(
+                new GUIContent("子目录", "留空就直接写到选定目录"), _export.subfolder);
+            _export.collision = EditorGUILayout.Popup(
+                new GUIContent("重名时"), _export.collision, CollisionNames);
+
+            DrawNamePreview();
+
+            EditorGUILayout.Space(2f);
+            _export.watermark = EditorGUILayout.Toggle("加水印", _export.watermark);
+            if (_export.watermark) DrawWatermarkFields();
+
+            EditorGUILayout.Space(4f);
+
             using (new EditorGUI.DisabledScope(_full == null))
-            {
-                // 排队到 Update 执行，不在 GUI 里做渲染和回读
                 if (GUILayout.Button("导出当前这张…")) _pendingAction = ExportSingle;
-            }
+
             using (new EditorGUI.DisabledScope(_lib.Visible.Count == 0))
             {
                 // 导出的是「筛选之后看得见的那些」，不是列表全部。
@@ -2190,17 +2215,111 @@ namespace Love.EditorTools
             }
         }
 
+        void DrawNamePreview()
+        {
+            // 模板改错了要能立刻看出来，不能等导完一批才发现文件名全是乱的
+            var ctx = new ExportContext
+            {
+                sourceName = _lib.Current != null ? _lib.Current.name : "IMG_0001",
+                index = 1, total = Mathf.Max(1, _lib.Visible.Count),
+                rating = _lib.Current?.rating ?? 0,
+                time = DateTime.Now,
+            };
+            if (_full != null)
+            {
+                _settings.OutputSize(_full.width, _full.height, out int gw, out int gh);
+                ExportNaming.ComputeSize(gw, gh, _export, out ctx.width, out ctx.height);
+            }
+
+            EditorGUILayout.LabelField("预览",
+                ExportNaming.Expand(_export.nameTemplate, ctx) + _export.Extension +
+                (ctx.width > 0 ? $"    {ctx.width}×{ctx.height}" : ""),
+                EditorStyles.miniLabel);
+
+            if (GUILayout.Button("可用记号…", EditorStyles.miniButton))
+            {
+                var menu = new GenericMenu();
+                foreach (var t in ExportNaming.Tokens)
+                {
+                    string tok = t.token;
+                    menu.AddItem(new GUIContent(tok + "  " + t.desc), false,
+                                 () => { _export.nameTemplate += tok; Repaint(); });
+                }
+                menu.ShowAsContext();
+            }
+        }
+
+        void DrawWatermarkFields()
+        {
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("图片", string.IsNullOrEmpty(_export.watermarkPath)
+                ? "（未选）" : Path.GetFileName(_export.watermarkPath));
+            if (GUILayout.Button("选择…", EditorStyles.miniButton, GUILayout.Width(50f)))
+            {
+                string p = EditorUtility.OpenFilePanel("选择水印图片（建议带透明通道的 PNG）", "", "png,jpg");
+                if (!string.IsNullOrEmpty(p)) { _export.watermarkPath = p; ReleaseWatermark(); }
+            }
+            EditorGUILayout.EndHorizontal();
+
+            _export.corner = EditorGUILayout.Popup(new GUIContent("位置"), _export.corner, CornerNames);
+            _export.wmScale = EditorGUILayout.Slider(
+                new GUIContent("大小", "相对输出画面的长边"), _export.wmScale, 0.02f, 0.6f);
+            _export.wmMargin = EditorGUILayout.Slider("边距", _export.wmMargin, 0f, 0.2f);
+            _export.wmOpacity = EditorGUILayout.Slider("不透明度", _export.wmOpacity, 0.05f, 1f);
+
+            if (string.IsNullOrEmpty(_export.watermarkPath))
+                EditorGUILayout.HelpBox("只支持图片水印。文字水印要在没有 OnGUI 的地方把字渲进贴图，" +
+                                        "编辑器里没有干净的做法。", MessageType.None);
+
+            EditorGUI.indentLevel--;
+        }
+
+        Texture2D Watermark
+        {
+            get
+            {
+                if (!_export.watermark || string.IsNullOrEmpty(_export.watermarkPath)) return null;
+                if (_watermark != null && _watermarkLoaded == _export.watermarkPath) return _watermark;
+
+                ReleaseWatermark();
+                try
+                {
+                    var t = new Texture2D(2, 2, TextureFormat.RGBA32, false, false)
+                    { hideFlags = HideFlags.HideAndDontSave };
+                    if (t.LoadImage(File.ReadAllBytes(_export.watermarkPath)))
+                    {
+                        _watermark = t;
+                        _watermarkLoaded = _export.watermarkPath;
+                    }
+                    else DestroyImmediate(t);
+                }
+                catch (Exception e) { Debug.LogWarning("[修图台] 水印读取失败：" + e.Message); }
+
+                return _watermark;
+            }
+        }
+
+        void ReleaseWatermark()
+        {
+            if (_watermark != null) DestroyImmediate(_watermark);
+            _watermark = null;
+            _watermarkLoaded = null;
+        }
+
         void ExportSingle()
         {
-            string ext = _exportJpg ? "jpg" : "png";
-            string suggested = (_lib.Current != null ? _lib.Current.name : "photo") + "_graded";
-            string path = EditorUtility.SaveFilePanel("导出修好的图片", "", suggested, ext);
+            if (_full == null || _lib.Current == null) return;
+
+            string path = EditorUtility.SaveFilePanel("导出修好的图片", "",
+                _lib.Current.name + "_graded", _export.jpg ? "jpg" : "png");
             if (string.IsNullOrEmpty(path)) return;
 
-            if (WriteProcessed(_full, path))
+            if (WriteProcessed(_full, path, _lib.Current, 1, 1))
             {
                 Debug.Log($"[修图台] 已导出：{path}");
-                EditorUtility.RevealInFinder(path);
+                if (!Application.isBatchMode) EditorUtility.RevealInFinder(path);
             }
         }
 
@@ -2209,15 +2328,27 @@ namespace Love.EditorTools
             string outDir = EditorUtility.SaveFolderPanel("导出到哪个文件夹", "", "graded");
             if (string.IsNullOrEmpty(outDir)) return;
 
-            Directory.CreateDirectory(outDir);
-            string ext = _exportJpg ? ".jpg" : ".png";
-            int ok = 0;
-
-            // 选中多张就导这些，否则导当前筛选下看得见的那些。
-            // 挑完片直接导出选中的那批，这才是挑片的意义
+            // 选中多张就导这些，否则导当前筛选下看得见的那些
             var batch = _lib.Selected.Count > 1
                 ? new List<PhotoEntry>(_lib.Selected)
                 : new List<PhotoEntry>(_lib.Visible);
+            if (batch.Count == 0) return;
+
+            if (!string.IsNullOrEmpty(_export.subfolder))
+                outDir = Path.Combine(outDir, ExportNaming.Sanitize(_export.subfolder));
+            Directory.CreateDirectory(outDir);
+
+            // 当前这张的参数还没落进 store，先收一下，否则它会用上一次存的
+            StashSettings();
+            StashRepairs();
+
+            // 这一批已经用掉的名字。只看磁盘不够：同一批里两张算出同名时文件还没落地，
+            // 第二张会直接盖掉第一张
+            var taken = new HashSet<string>();
+            var now = DateTime.Now;
+            int ok = 0, skipped = 0;
+
+            var mySettings = _settings.Clone();   // 循环里要临时改 _settings，先留个底
 
             try
             {
@@ -2227,73 +2358,144 @@ namespace Love.EditorTools
                     if (EditorUtility.DisplayCancelableProgressBar(
                             "批量导出", entry.name, (float)i / batch.Count)) break;
 
-                    // 源目录和输出目录相同会覆盖原图，这里靠改名避开
-                    string outPath = Path.Combine(outDir, entry.name + "_graded" + ext);
+                    // 每张用它自己的参数和修补
+                    var rec = _store.Get(entry.path);
+                    if (rec != null && rec.hasSettings && rec.settings != null) _settings.CopyFrom(rec.settings);
+                    else _settings.CopyFrom(mySettings);
 
-                    var tex = LoadTextureFromFile(entry.path);
+                    // 字符串要比内容不能比引用：两个内容相同的 string 未必是同一个对象。
+                    // 比错的话当前这张会被重新从磁盘读一遍，蒙版和修补也就套不上去了
+                    var tex = entry.path == _loadedPath && _full != null
+                        ? _full : LoadTextureFromFile(entry.path);
                     if (tex == null) continue;
-                    if (WriteProcessed(tex, outPath)) ok++;
-                    DestroyImmediate(tex);
+
+                    _settings.OutputSize(tex.width, tex.height, out int gw, out int gh);
+                    ExportNaming.ComputeSize(gw, gh, _export, out int ew, out int eh);
+
+                    string name = ExportNaming.Expand(_export.nameTemplate, new ExportContext
+                    {
+                        sourceName = entry.name, index = i + 1, total = batch.Count,
+                        width = ew, height = eh, rating = entry.rating, time = now,
+                    });
+
+                    string outPath = ExportNaming.Resolve(outDir, name, _export.Extension,
+                                                          _export.collision, taken, null);
+                    if (outPath == null) { skipped++; }
+                    else if (WriteProcessed(tex, outPath, entry, i + 1, batch.Count)) ok++;
+
+                    if (!ReferenceEquals(tex, _full)) DestroyImmediate(tex);
                 }
             }
-            finally { EditorUtility.ClearProgressBar(); }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                _settings.CopyFrom(mySettings);
+                _dirty = true;
+            }
 
-            Debug.Log($"[修图台] 批量导出完成：{ok}/{batch.Count}");
-            EditorUtility.DisplayDialog("修图台", $"导出完成 {ok} / {batch.Count} 张\n\n{outDir}", "好");
-            EditorUtility.RevealInFinder(outDir + "/");
+            string msg = $"导出完成 {ok} / {batch.Count} 张" + (skipped > 0 ? $"，跳过 {skipped} 张重名的" : "");
+            Debug.Log("[修图台] " + msg);
+            if (!Application.isBatchMode)
+            {
+                EditorUtility.DisplayDialog("修图台", msg + "\n\n" + outDir, "好");
+                EditorUtility.RevealInFinder(outDir + "/");
+            }
         }
 
-        /// <summary>按当前参数处理并写文件。分屏和旁路只是查看方式，导出时强制关掉。</summary>
-        bool WriteProcessed(Texture2D tex, string path)
+        /// <summary>
+        /// 按当前参数处理并写文件。分屏和旁路只是查看方式，导出时强制关掉。
+        ///
+        /// 顺序是：调色（几何变换后的尺寸）-> 缩放到导出尺寸 -> 贴水印 -> 回读 -> 编码。
+        /// 水印必须最后贴，不然会跟着一起被缩放和调色。
+        /// </summary>
+        bool WriteProcessed(Texture2D tex, string path, PhotoEntry entry, int index, int total)
         {
             var r = Renderer;
             if (r == null || tex == null) return false;
 
-            // 导出永远按真实的裁剪结果走，和画布当前是不是裁剪模式无关
-            _settings.OutputSize(tex.width, tex.height, out int ow, out int oh);
+            _settings.OutputSize(tex.width, tex.height, out int gw, out int gh);
+            ExportNaming.ComputeSize(gw, gh, _export, out int ew, out int eh);
 
-            var rt = RenderTexture.GetTemporary(ow, oh, 0,
-                                                RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
-            var readback = new Texture2D(ow, oh, TextureFormat.RGBA32, false, false)
+            var graded = RenderTexture.GetTemporary(gw, gh, 0,
+                                                    RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+            RenderTexture scaled = null;
+            var readback = new Texture2D(ew, eh, TextureFormat.RGBA32, false, false)
             { hideFlags = HideFlags.HideAndDontSave };
 
             try
             {
                 r.GrainSeed = 7f;
-                // 批量导出时每张图的蒙版不同，只有当前这张能用已生成的
-                var opts = new VideoGradeRenderer.Options();
+
                 // 批量导出别的图时不能套当前这张的蒙版和修补——它们是逐图的
                 bool isCurrent = ReferenceEquals(tex, _full);
+                var opts = new VideoGradeRenderer.Options();
                 if (isCurrent) { opts.externalMask = CurrentMask; opts.depthMap = CurrentMask; }
                 opts.lut = _lut;
                 opts.lutAmount = _lutAmount;
                 opts.brushes = _brushes;
-                r.Render(isCurrent ? GradeSource : tex, rt, _settings, opts);
+                r.Render(isCurrent ? GradeSource : tex, graded, _settings, opts);
+
+                RenderTexture target = graded;
+                if (ew != gw || eh != gh)
+                {
+                    scaled = RenderTexture.GetTemporary(ew, eh, 0,
+                                                        RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                    Graphics.Blit(graded, scaled);
+                    target = scaled;
+                }
+
+                StampWatermark(target);
 
                 var prev = RenderTexture.active;
-                RenderTexture.active = rt;
-                readback.ReadPixels(new Rect(0f, 0f, ow, oh), 0, 0, false);
+                RenderTexture.active = target;
+                readback.ReadPixels(new Rect(0f, 0f, ew, eh), 0, 0, false);
                 readback.Apply(false, false);
                 RenderTexture.active = prev;
 
-                byte[] bytes = _exportJpg ? readback.EncodeToJPG(_jpgQuality) : readback.EncodeToPNG();
+                byte[] bytes = _export.jpg ? readback.EncodeToJPG(_export.jpgQuality) : readback.EncodeToPNG();
                 string dir = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllBytes(path, bytes);
                 return true;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Debug.LogError($"[修图台] 导出失败 {path}：{e.Message}");
                 return false;
             }
             finally
             {
-                RenderTexture.ReleaseTemporary(rt);
+                RenderTexture.ReleaseTemporary(graded);
+                if (scaled != null) RenderTexture.ReleaseTemporary(scaled);
                 DestroyImmediate(readback);
                 // 渲染完把预览标脏，否则下一帧会沿用导出时设的参数
                 _dirty = true;
             }
+        }
+
+        /// <summary>把水印贴到目标上。用 Graphics.DrawTexture 走内置的带 alpha 混合的材质，省一个 shader。</summary>
+        void StampWatermark(RenderTexture target)
+        {
+            var wm = Watermark;
+            if (wm == null || target == null) return;
+
+            float longEdge = Mathf.Max(target.width, target.height);
+            float w = longEdge * Mathf.Clamp(_export.wmScale, 0.01f, 1f);
+            float h = w * wm.height / Mathf.Max(wm.width, 1);
+            float m = longEdge * Mathf.Clamp01(_export.wmMargin);
+
+            // LoadPixelMatrix 之后原点在左上，和 DrawTexture 的约定一致
+            float x = (_export.corner == 0 || _export.corner == 2) ? m : target.width - w - m;
+            float y = (_export.corner == 0 || _export.corner == 1) ? m : target.height - h - m;
+
+            var prev = RenderTexture.active;
+            RenderTexture.active = target;
+            GL.PushMatrix();
+            GL.LoadPixelMatrix(0f, target.width, target.height, 0f);
+            Graphics.DrawTexture(new Rect(x, y, w, h), wm, new Rect(0f, 0f, 1f, 1f),
+                                 0, 0, 0, 0, new Color(1f, 1f, 1f, Mathf.Clamp01(_export.wmOpacity)));
+            GL.PopMatrix();
+            RenderTexture.active = prev;
         }
 
         #endregion
