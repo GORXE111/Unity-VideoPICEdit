@@ -49,3 +49,8 @@ crashlytics-build.properties
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 离线编译（Tools/checkruntime.py 之类）如果忘了改 -out:，
+# csc 会按第一个源文件命名、丢在工程根目录下
+/LOVE/*.dll
+/LOVE/*.pdb
