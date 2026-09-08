@@ -54,3 +54,6 @@ desktop.ini
 # csc 会按第一个源文件命名、丢在工程根目录下
 /LOVE/*.dll
 /LOVE/*.pdb
+
+# batchmode 打包的日志
+/*.log
